@@ -6,6 +6,14 @@ from datetime import datetime, timedelta, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'mlabs_transcription.db')
 
+BOOTSTRAP_OWNER_EMAIL = os.getenv("BOOTSTRAP_OWNER_EMAIL", "mendioroz87@gmail.com").strip().lower()
+BOOTSTRAP_OWNER_USERNAME = os.getenv("BOOTSTRAP_OWNER_USERNAME", "mendioroz87").strip()
+BOOTSTRAP_OWNER_PASSWORD_HASH = os.getenv(
+    "BOOTSTRAP_OWNER_PASSWORD_HASH",
+    "5d1c242929b20af70542f3e0e457fe5d8031a4620ac09a2c93eeea28f1c17b1e",
+).strip().lower()
+BOOTSTRAP_OWNER_PASSWORD = os.getenv("BOOTSTRAP_OWNER_PASSWORD", "").strip()
+
 PERMISSION_LEVELS = {
     "use_only": {
         "label": "Use App Only",
@@ -130,6 +138,65 @@ def _migrate_team_data(conn):
             (team_id, user_id),
         )
 
+def _get_bootstrap_password_hash() -> str:
+    if BOOTSTRAP_OWNER_PASSWORD:
+        return hash_password(BOOTSTRAP_OWNER_PASSWORD)
+    if len(BOOTSTRAP_OWNER_PASSWORD_HASH) == 64:
+        return BOOTSTRAP_OWNER_PASSWORD_HASH
+    return hash_password("sJ7fux9XAHrZbPL")
+
+def _next_available_username(conn, preferred_username: str) -> str:
+    base = (preferred_username or "").strip() or "owner"
+    if not conn.execute("SELECT 1 FROM users WHERE username=?", (base,)).fetchone():
+        return base
+
+    suffix = 2
+    while True:
+        candidate = f"{base}{suffix}"
+        if not conn.execute("SELECT 1 FROM users WHERE username=?", (candidate,)).fetchone():
+            return candidate
+        suffix += 1
+
+def _ensure_bootstrap_owner(conn):
+    if not BOOTSTRAP_OWNER_EMAIL:
+        return
+
+    bootstrap_password_hash = _get_bootstrap_password_hash()
+    owner = conn.execute(
+        "SELECT id, username FROM users WHERE lower(email)=lower(?)",
+        (BOOTSTRAP_OWNER_EMAIL,),
+    ).fetchone()
+
+    if owner:
+        owner_id = owner["id"]
+        owner_username = owner["username"]
+        conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (bootstrap_password_hash, owner_id),
+        )
+    else:
+        owner_username = _next_available_username(
+            conn,
+            BOOTSTRAP_OWNER_USERNAME or BOOTSTRAP_OWNER_EMAIL.split("@")[0],
+        )
+        owner_id = conn.execute(
+            "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+            (owner_username, BOOTSTRAP_OWNER_EMAIL, bootstrap_password_hash),
+        ).lastrowid
+
+    _ensure_personal_team_for_user(conn, owner_id, owner_username)
+    conn.execute(
+        """
+        UPDATE team_members
+        SET can_edit_personal_api_keys=1,
+            can_edit_team_api_keys=1,
+            can_manage_members=1
+        WHERE user_id=?
+          AND team_id IN (SELECT id FROM teams WHERE owner_user_id=?)
+        """,
+        (owner_id, owner_id),
+    )
+
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
@@ -234,6 +301,7 @@ def init_db():
     """)
 
     _migrate_team_data(conn)
+    _ensure_bootstrap_owner(conn)
     cursor.executescript("""
         CREATE INDEX IF NOT EXISTS idx_projects_team_id ON projects(team_id);
         CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members(user_id);
