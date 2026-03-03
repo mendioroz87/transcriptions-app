@@ -55,7 +55,7 @@ SUMMARY_ROLE_INSTRUCTIONS = (
     "Your goal is to transform raw transcripts into high-utility, structured summaries."
 )
 
-SUMMARY_TASK_INSTRUCTIONS = """Analyze the provided transcript and follow this three-step execution plan:
+SUMMARY_TASK_INSTRUCTIONS = """Analyze the provided transcript and follow this three-step execution plan internally (do not output these steps):
 
 ## Step 1: Classification & Framework Selection
 First, identify the nature of the transcript (e.g., Business Meeting, Qualitative Interview, Academic Lecture, Podcast, Legal Deposition, or Workshop). Based on this classification, select the most appropriate summary framework.
@@ -78,6 +78,31 @@ SUMMARY_OUTPUT_CONSTRAINTS = """- The output language MUST be exactly: {transcri
 - Use precise, concrete points rather than generic statements."""
 
 SUMMARY_METADATA_CONTEXT_TEMPLATE = "Language from transcription metadata: {transcript_language}"
+SUMMARY_SYSTEM_PROMPT_TEMPLATE = """{role_instructions}
+
+You must think internally and return only the final answer.
+Do not reveal reasoning steps, chain-of-thought, scratch work, or process notes.
+Do not output labels like "Step 1", "Step 2", "analysis", or "internal reasoning".
+
+Output format rules:
+- Return valid Markdown only.
+- The response language MUST be exactly: {transcript_language}
+- The summary must be highly detailed for the selected framework.
+- Start directly with the first section header, with no preface."""
+
+SUMMARY_USER_PROMPT_TEMPLATE = """Generate the final structured summary using these instructions:
+
+<summary_instructions>
+{summary_instructions}
+</summary_instructions>
+
+<transcript_metadata>
+{metadata_context}
+</transcript_metadata>
+
+<transcription>
+{transcription_text}
+</transcription>"""
 
 DEFAULT_SUMMARY_PROMPT = """# Role
 {role_instructions}
@@ -312,11 +337,13 @@ class _SafePromptVarMap(dict):
 
 
 def _sanitize_transcription_text(transcription_text: str) -> str:
-    return (transcription_text or "").strip().replace('"""', "'''")
+    sanitized = (transcription_text or "").strip().replace('"""', "'''")
+    sanitized = sanitized.replace("<transcription>", "").replace("</transcription>", "")
+    return sanitized.replace("<transcripcion>", "").replace("</transcripcion>", "")
 
 
-def _build_summary_prompt(
-    prompt_template: str,
+def _build_summary_prompt_payload(
+    summary_instructions_template: str,
     *,
     transcript_language: str,
     transcription_text: str,
@@ -324,9 +351,11 @@ def _build_summary_prompt(
     task_instructions: str = SUMMARY_TASK_INSTRUCTIONS,
     output_constraints_template: str = SUMMARY_OUTPUT_CONSTRAINTS,
     metadata_context_template: str = SUMMARY_METADATA_CONTEXT_TEMPLATE,
-) -> str:
+    system_prompt_template: str = SUMMARY_SYSTEM_PROMPT_TEMPLATE,
+    user_prompt_template: str = SUMMARY_USER_PROMPT_TEMPLATE,
+) -> dict:
     language_value = (transcript_language or "unknown").strip() or "unknown"
-    prompt_variables = _SafePromptVarMap(
+    base_variables = _SafePromptVarMap(
         {
             "transcript_language": language_value,
             "role_instructions": role_instructions,
@@ -341,13 +370,29 @@ def _build_summary_prompt(
         }
     )
 
-    template = prompt_template or DEFAULT_SUMMARY_PROMPT
-    prompt = template.format_map(prompt_variables)
+    template = summary_instructions_template or DEFAULT_SUMMARY_PROMPT
+    summary_instructions = template.format_map(base_variables)
+    summary_instructions = summary_instructions.replace(
+        "[TRANSCRIPT_LANGUAGE]", base_variables["transcript_language"]
+    )
+    summary_instructions = summary_instructions.replace(
+        "[PASTE YOUR TRANSCRIPT HERE]", base_variables["transcription_text"]
+    )
 
-    # Backward compatibility for legacy templates that still use bracket placeholders.
-    prompt = prompt.replace("[TRANSCRIPT_LANGUAGE]", prompt_variables["transcript_language"])
-    prompt = prompt.replace("[PASTE YOUR TRANSCRIPT HERE]", prompt_variables["transcription_text"])
-    return prompt
+    prompt_variables = _SafePromptVarMap(
+        {
+            **base_variables,
+            "summary_instructions": summary_instructions,
+        }
+    )
+    system_prompt = system_prompt_template.format_map(prompt_variables)
+    user_prompt = user_prompt_template.format_map(prompt_variables)
+    return {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "transcript_language": language_value,
+        "transcription_text": prompt_variables["transcription_text"],
+    }
 
 
 def summarize_transcript_with_openai(
@@ -368,11 +413,13 @@ def summarize_transcript_with_openai(
         raise ImportError("openai package not installed. Run: pip install openai") from exc
 
     client = OpenAI(api_key=api_key)
-    prompt = _build_summary_prompt(
+    prompt_payload = _build_summary_prompt_payload(
         prompt_template,
         transcript_language=transcript_language,
         transcription_text=transcript,
     )
+    system_prompt = prompt_payload["system_prompt"]
+    user_prompt = prompt_payload["user_prompt"]
 
     response = None
     if hasattr(client, "responses"):
@@ -380,24 +427,38 @@ def summarize_transcript_with_openai(
             response = client.responses.create(
                 model=model,
                 reasoning={"effort": "low"},
-                input=prompt,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
         except Exception:
             response = client.responses.create(
                 model=model,
-                input=prompt,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
     else:
         try:
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
                 reasoning_effort="low",
             )
         except Exception:
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
 
     summary_text = _extract_openai_text(response)
