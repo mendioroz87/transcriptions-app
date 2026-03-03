@@ -50,11 +50,12 @@ MODELS = {
 }
 
 SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4.1-nano")
-DEFAULT_SUMMARY_PROMPT = """# Role
-You are an expert Information Architect and Transcription Analyst. Your goal is to transform raw transcripts into high-utility, structured summaries.
+SUMMARY_ROLE_INSTRUCTIONS = (
+    "You are an expert Information Architect and Transcription Analyst. "
+    "Your goal is to transform raw transcripts into high-utility, structured summaries."
+)
 
-# Task
-Analyze the provided transcript and follow this three-step execution plan:
+SUMMARY_TASK_INSTRUCTIONS = """Analyze the provided transcript and follow this three-step execution plan:
 
 ## Step 1: Classification & Framework Selection
 First, identify the nature of the transcript (e.g., Business Meeting, Qualitative Interview, Academic Lecture, Podcast, Legal Deposition, or Workshop). Based on this classification, select the most appropriate summary framework.
@@ -70,18 +71,28 @@ Generate the summary using the selected framework. Regardless of the type, your 
    - *For Meetings:* Decisions Made, Action Items (with owners), and Blockers.
    - *For Interviews:* Key Insights, Direct Quotes, and Participant Sentiment.
    - *For Lectures/Podcasts:* Main Thesis, Key Concepts, and Further Reading/Action.
-4. **The "A-Ha" Moment:** One non-obvious insight or important subtext found in the transcript.
+4. **The "A-Ha" Moment:** One non-obvious insight or important subtext found in the transcript."""
+
+SUMMARY_OUTPUT_CONSTRAINTS = """- The output language MUST be exactly: {transcript_language}
+- Make the summary highly detailed in every section of the selected framework.
+- Use precise, concrete points rather than generic statements."""
+
+SUMMARY_METADATA_CONTEXT_TEMPLATE = "Language from transcription metadata: {transcript_language}"
+
+DEFAULT_SUMMARY_PROMPT = """# Role
+{role_instructions}
+
+# Task
+{task_instructions}
 
 # Output Constraints
-- The output language MUST be exactly: [TRANSCRIPT_LANGUAGE]
-- Make the summary highly detailed in every section of the selected framework.
-- Use precise, concrete points rather than generic statements.
+{output_constraints}
 
 # Context (Transcript Metadata)
-Language from transcription metadata: [TRANSCRIPT_LANGUAGE]
+{metadata_context}
 
 # Context (Transcript Data)
-[PASTE YOUR TRANSCRIPT HERE]
+{transcription_text}
 """
 
 
@@ -293,6 +304,52 @@ def _extract_openai_text(response) -> str:
     return ""
 
 
+class _SafePromptVarMap(dict):
+    """Leave unknown template variables untouched instead of raising KeyError."""
+
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _sanitize_transcription_text(transcription_text: str) -> str:
+    return (transcription_text or "").strip().replace('"""', "'''")
+
+
+def _build_summary_prompt(
+    prompt_template: str,
+    *,
+    transcript_language: str,
+    transcription_text: str,
+    role_instructions: str = SUMMARY_ROLE_INSTRUCTIONS,
+    task_instructions: str = SUMMARY_TASK_INSTRUCTIONS,
+    output_constraints_template: str = SUMMARY_OUTPUT_CONSTRAINTS,
+    metadata_context_template: str = SUMMARY_METADATA_CONTEXT_TEMPLATE,
+) -> str:
+    language_value = (transcript_language or "unknown").strip() or "unknown"
+    prompt_variables = _SafePromptVarMap(
+        {
+            "transcript_language": language_value,
+            "role_instructions": role_instructions,
+            "task_instructions": task_instructions,
+            "output_constraints": output_constraints_template.format(
+                transcript_language=language_value
+            ),
+            "metadata_context": metadata_context_template.format(
+                transcript_language=language_value
+            ),
+            "transcription_text": _sanitize_transcription_text(transcription_text),
+        }
+    )
+
+    template = prompt_template or DEFAULT_SUMMARY_PROMPT
+    prompt = template.format_map(prompt_variables)
+
+    # Backward compatibility for legacy templates that still use bracket placeholders.
+    prompt = prompt.replace("[TRANSCRIPT_LANGUAGE]", prompt_variables["transcript_language"])
+    prompt = prompt.replace("[PASTE YOUR TRANSCRIPT HERE]", prompt_variables["transcription_text"])
+    return prompt
+
+
 def summarize_transcript_with_openai(
     transcript: str,
     api_key: str,
@@ -311,9 +368,11 @@ def summarize_transcript_with_openai(
         raise ImportError("openai package not installed. Run: pip install openai") from exc
 
     client = OpenAI(api_key=api_key)
-    prompt = prompt_template
-    prompt = prompt.replace("[TRANSCRIPT_LANGUAGE]", (transcript_language or "unknown").strip())
-    prompt = prompt.replace("[PASTE YOUR TRANSCRIPT HERE]", transcript.strip())
+    prompt = _build_summary_prompt(
+        prompt_template,
+        transcript_language=transcript_language,
+        transcription_text=transcript,
+    )
 
     response = None
     if hasattr(client, "responses"):
