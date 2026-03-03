@@ -19,6 +19,11 @@ from utils.auth_ui import (
 )
 from utils.components import sidebar_navigation, render_duration_badge, render_status_badge
 
+INVITE_ME_LINK = (
+    "https://wa.me/50558601131?text=Please%20invite%20me%20to%20your%20transcription%20app,"
+    "%20this%20is%20my%20email:"
+)
+
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="MLabs Transcription",
@@ -82,6 +87,11 @@ if not is_logged_in():
     with col1:
         st.markdown('<p class="main-title">MLabs Transcription</p>', unsafe_allow_html=True)
         st.markdown('<p class="subtitle">Transcribe any audio — any length — any format</p>', unsafe_allow_html=True)
+        st.markdown(
+            "MLabs Transcription helps teams transcribe long-form audio with shared workspaces, "
+            "permissioned access, and export-ready outputs."
+        )
+        st.caption("Made by MLabs")
         st.markdown("")
 
         features = [
@@ -98,6 +108,7 @@ if not is_logged_in():
     with col2:
         st.markdown("### Welcome")
         st.caption("Sign in to access your team workspace.")
+        st.link_button("Invite Me", INVITE_ME_LINK, use_container_width=True)
         render_login_form()
 
 else:
@@ -192,4 +203,5 @@ else:
                     st.markdown(f"**Words:** {(tx.get('word_count') or 0):,}")
     else:
         st.info("No transcriptions yet. Start by creating a project and uploading an audio file!")
+
 
