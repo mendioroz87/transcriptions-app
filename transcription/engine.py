@@ -6,6 +6,7 @@ Supports: OpenAI Whisper, ElevenLabs Scribe v2, NVIDIA Parakeet, Real-time (Fast
 import os
 import time
 import tempfile
+import importlib.util
 from typing import Callable, Optional, List
 from audio.processor import split_audio_into_chunks, get_audio_duration, cleanup_temp_files
 
@@ -53,6 +54,51 @@ MODELS = {
 # Model readiness checks
 # ---------------------------------------------------------------------------
 
+
+class TranscriptionUserError(RuntimeError):
+    """Expected user-facing transcription errors (auth/quota/provider restrictions)."""
+
+def _module_exists(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+def _build_elevenlabs_error_message(response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, dict):
+        detail_status = (detail.get("status") or "").strip()
+        detail_message = (detail.get("message") or "").strip()
+
+        if detail_status == "detected_unusual_activity":
+            return (
+                "ElevenLabs blocked this request due to unusual activity on Free Tier. "
+                "Disable VPN/proxy, use a paid ElevenLabs plan, or switch to another model."
+            )
+
+        if response.status_code == 401 or detail_status == "invalid_api_key":
+            return "ElevenLabs authentication failed. Verify your API key and account access."
+
+        if detail_message:
+            return f"ElevenLabs error: {detail_message}"
+        if detail_status:
+            return f"ElevenLabs error: {detail_status}"
+
+    if isinstance(detail, str) and detail.strip():
+        return f"ElevenLabs error: {detail.strip()}"
+
+    if response.status_code == 401:
+        return "ElevenLabs authentication failed (401). Verify your API key and account access."
+
+    return f"ElevenLabs API error {response.status_code}: {response.text[:300]}"
+
+
 def check_model_requirements(model: str, api_key: str = None) -> tuple[bool, Optional[str]]:
     """Validate runtime requirements for a selected model."""
     if model == "whisper" and not api_key:
@@ -61,15 +107,11 @@ def check_model_requirements(model: str, api_key: str = None) -> tuple[bool, Opt
         return False, "ElevenLabs API key is required for Scribe v2."
 
     if model == "parakeet":
-        try:
-            import nemo.collections.asr  # noqa: F401
-        except ImportError:
+        if not _module_exists("nemo.collections.asr"):
             return False, "NeMo toolkit not installed. Run: pip install nemo_toolkit['asr']"
 
     if model == "realtime":
-        try:
-            from faster_whisper import WhisperModel  # noqa: F401
-        except ImportError:
+        if not _module_exists("faster_whisper"):
             return False, "faster-whisper not installed. Run: pip install faster-whisper"
 
     return True, None
@@ -120,7 +162,7 @@ def transcribe_with_elevenlabs(audio_path: str, api_key: str, language: str = No
         response = requests.post(url, headers=headers, files=files, data=data)
 
     if response.status_code != 200:
-        raise RuntimeError(f"ElevenLabs API error {response.status_code}: {response.text}")
+        raise TranscriptionUserError(_build_elevenlabs_error_message(response))
 
     result = response.json()
     speakers = {}
@@ -240,6 +282,8 @@ def transcribe(
                 else:
                     raise ValueError(f"Unknown model: {model}")
             except Exception as e:
+                if isinstance(e, TranscriptionUserError):
+                    raise TranscriptionUserError(f"Transcription failed for {chunk_label}: {e}") from e
                 raise RuntimeError(f"Transcription failed for {chunk_label}: {e}") from e
 
             all_texts.append(result.get("text", ""))

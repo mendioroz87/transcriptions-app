@@ -173,6 +173,6 @@ else:
                 with col2:
                     st.markdown(f"**Model:** {tx.get('model_used', 'N/A')}")
                     st.markdown(f"**Language:** {tx.get('language', 'N/A')}")
-                    st.markdown(f"**Words:** {tx.get('word_count', 0):,}")
+                    st.markdown(f"**Words:** {(tx.get('word_count') or 0):,}")
     else:
         st.info("No transcriptions yet. Start by creating a project and uploading an audio file!")

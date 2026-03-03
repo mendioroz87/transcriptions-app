@@ -22,7 +22,7 @@ from database.db import (  # noqa: E402
     get_user_projects,
     update_transcription,
 )
-from transcription.engine import MODELS, check_model_requirements, transcribe  # noqa: E402
+from transcription.engine import MODELS, TranscriptionUserError, check_model_requirements, transcribe  # noqa: E402
 from utils.auth_ui import get_current_user, require_login  # noqa: E402
 from utils.components import render_duration_badge, sidebar_navigation  # noqa: E402
 
@@ -238,4 +238,5 @@ with col_upload:
                     update_transcription(tid, transcript="", status="error")
                 progress_bar.empty()
                 st.error(f"Transcription failed: {exc}")
-                st.exception(exc)
+                if not isinstance(exc, TranscriptionUserError):
+                    st.exception(exc)

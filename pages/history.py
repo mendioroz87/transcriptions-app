@@ -1,114 +1,149 @@
-"""
-History Page — View, search, and export past transcriptions.
+﻿"""
+History Page - View, search, export, and remove transcriptions.
 """
 
-import streamlit as st
-import sys
 import os
+import sys
+
+import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from database.db import (
-    get_user_projects, get_project_transcriptions, get_transcription, delete_transcription
+from database.db import (  # noqa: E402
+    delete_transcription,
+    delete_transcriptions_bulk,
+    get_project_transcriptions,
+    get_user_projects,
 )
-from exports.exporter import (
-    export_as_txt, export_as_json, export_as_markdown,
-    export_as_docx, export_as_csv
+from exports.exporter import (  # noqa: E402
+    export_as_csv,
+    export_as_docx,
+    export_as_json,
+    export_as_markdown,
+    export_as_txt,
 )
-from utils.auth_ui import require_login, get_current_user
-from utils.components import sidebar_navigation, render_status_badge, render_duration_badge
+from utils.auth_ui import get_current_user, require_login  # noqa: E402
+from utils.components import render_duration_badge, render_status_badge, sidebar_navigation  # noqa: E402
 
-st.set_page_config(page_title="History — MLabs", page_icon="📜", layout="wide")
+
+st.set_page_config(page_title="History - MLabs", page_icon="H", layout="wide")
 sidebar_navigation()
 require_login()
 
 user = get_current_user()
 projects = get_user_projects(user["id"])
 
-st.title("📜 Transcription History")
-st.caption("Browse, search, and export all your past transcriptions.")
+st.title("Transcription History")
+st.caption("Browse, search, export, and remove your transcriptions.")
 st.markdown("---")
 
 if not projects:
     st.info("No projects yet.")
     st.stop()
 
-# ── Filters ───────────────────────────────────────────────────────────────────
 col_f1, col_f2, col_f3 = st.columns(3)
 
 with col_f1:
     project_map = {"All Projects": None}
-    project_map.update({p["name"]: p["id"] for p in projects})
+    project_map.update({project["name"]: project["id"] for project in projects})
 
-    # Pre-select from session state if set
     default_proj_name = "All Projects"
     if "current_project" in st.session_state:
-        cp = st.session_state["current_project"]
-        if cp["name"] in project_map:
-            default_proj_name = cp["name"]
+        current_project = st.session_state["current_project"]
+        if current_project["name"] in project_map:
+            default_proj_name = current_project["name"]
 
-    selected_proj_name = st.selectbox("Filter by Project", list(project_map.keys()),
-                                       index=list(project_map.keys()).index(default_proj_name))
+    selected_proj_name = st.selectbox(
+        "Filter by Project",
+        list(project_map.keys()),
+        index=list(project_map.keys()).index(default_proj_name),
+    )
 
 with col_f2:
     status_filter = st.selectbox("Status", ["All", "completed", "processing", "error"])
 
 with col_f3:
-    search_query = st.text_input("🔍 Search transcripts", placeholder="Type to search...")
+    search_query = st.text_input("Search transcripts", placeholder="Type to search...")
 
-# ── Load Transcriptions ───────────────────────────────────────────────────────
 all_transcriptions = []
 for project in projects:
-    if project_map[selected_proj_name] and project["id"] != project_map[selected_proj_name]:
+    selected_project_id = project_map[selected_proj_name]
+    if selected_project_id and project["id"] != selected_project_id:
         continue
-    txs = get_project_transcriptions(project["id"])
-    for tx in txs:
-        tx["project_name"] = project["name"]
-        all_transcriptions.append(tx)
 
-all_transcriptions.sort(key=lambda x: x["created_at"], reverse=True)
+    for transcription in get_project_transcriptions(project["id"]):
+        transcription["project_name"] = project["name"]
+        all_transcriptions.append(transcription)
 
-# Apply filters
+all_transcriptions.sort(key=lambda tx: tx["created_at"], reverse=True)
+
 if status_filter != "All":
-    all_transcriptions = [t for t in all_transcriptions if t["status"] == status_filter]
+    all_transcriptions = [tx for tx in all_transcriptions if tx["status"] == status_filter]
 
 if search_query:
     q = search_query.lower()
     all_transcriptions = [
-        t for t in all_transcriptions
-        if q in (t.get("original_filename") or "").lower()
-        or q in (t.get("transcript") or "").lower()
+        tx
+        for tx in all_transcriptions
+        if q in (tx.get("original_filename") or "").lower()
+        or q in (tx.get("transcript") or "").lower()
     ]
 
-# ── Bulk Export ───────────────────────────────────────────────────────────────
 if all_transcriptions:
-    with st.expander(f"📦 Bulk Export ({len(all_transcriptions)} records)"):
+    with st.expander(f"Bulk Export ({len(all_transcriptions)} records)"):
         st.download_button(
-            "⬇️ Export all as CSV",
+            "Export all as CSV",
             data=export_as_csv(all_transcriptions),
             file_name="mlabs_transcriptions.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
+    with st.expander(f"Bulk Remove ({len(all_transcriptions)} records)", expanded=False):
+        st.caption("Delete selected transcriptions from the filtered list. This cannot be undone.")
+        tx_label_to_id = {
+            f"{tx['original_filename']} | {tx.get('created_at', '')[:19]} | id={tx['id']}": tx["id"]
+            for tx in all_transcriptions
+        }
+        selected_labels = st.multiselect(
+            "Select transcriptions to delete",
+            options=list(tx_label_to_id.keys()),
+            key="bulk_delete_transcriptions_select",
+        )
+        confirmed = st.checkbox(
+            "I understand these deletions are permanent.",
+            key="bulk_delete_transcriptions_confirm",
+        )
+
+        if st.button(
+            "Delete Selected Transcriptions",
+            type="secondary",
+            use_container_width=True,
+            disabled=not selected_labels or not confirmed,
+            key="bulk_delete_transcriptions_btn",
+        ):
+            selected_ids = [tx_label_to_id[label] for label in selected_labels]
+            deleted_count = delete_transcriptions_bulk(selected_ids)
+            st.warning(f"Deleted {deleted_count} transcription(s).")
+            st.rerun()
+
 st.markdown(f"**{len(all_transcriptions)} transcriptions found**")
 st.markdown("")
 
-# ── Transcription Cards ───────────────────────────────────────────────────────
 if not all_transcriptions:
     st.info("No transcriptions match your filters.")
 else:
     for tx in all_transcriptions:
         label = (
             f"{render_status_badge(tx['status'])}  {tx['original_filename']}"
-            f"  —  📁 {tx['project_name']}"
-            f"  •  ⏱️ {render_duration_badge(tx.get('duration_seconds')) or '?'}"
-            f"  •  📝 {tx.get('word_count') or 0:,} words"
-            f"  •  🌐 {tx.get('language') or '?'}"
+            f"  |  {tx['project_name']}"
+            f"  |  {render_duration_badge(tx.get('duration_seconds')) or '?'}"
+            f"  |  {(tx.get('word_count') or 0):,} words"
+            f"  |  {tx.get('language') or '?'}"
         )
 
         with st.expander(label):
-            tab_text, tab_export, tab_meta = st.tabs(["📄 Transcript", "⬇️ Export", "ℹ️ Metadata"])
+            tab_text, tab_export, tab_meta = st.tabs(["Transcript", "Export", "Metadata"])
 
             transcript = tx.get("transcript") or ""
 
@@ -129,7 +164,7 @@ else:
                     st.markdown("**Choose export format:**")
                     ec1, ec2, ec3, ec4, ec5 = st.columns(5)
 
-                    fname = os.path.splitext(tx["original_filename"])[0]
+                    file_stem = os.path.splitext(tx["original_filename"])[0]
                     meta = {
                         "model_used": tx.get("model_used", ""),
                         "language": tx.get("language", ""),
@@ -139,38 +174,52 @@ else:
 
                     with ec1:
                         st.download_button(
-                            "📄 TXT", export_as_txt(transcript, fname),
-                            file_name=f"{fname}.txt", mime="text/plain",
-                            use_container_width=True, key=f"txt_{tx['id']}"
+                            "TXT",
+                            export_as_txt(transcript, file_stem),
+                            file_name=f"{file_stem}.txt",
+                            mime="text/plain",
+                            use_container_width=True,
+                            key=f"txt_{tx['id']}",
                         )
                     with ec2:
                         st.download_button(
-                            "🗂️ JSON", export_as_json(tx),
-                            file_name=f"{fname}.json", mime="application/json",
-                            use_container_width=True, key=f"json_{tx['id']}"
+                            "JSON",
+                            export_as_json(tx),
+                            file_name=f"{file_stem}.json",
+                            mime="application/json",
+                            use_container_width=True,
+                            key=f"json_{tx['id']}",
                         )
                     with ec3:
                         st.download_button(
-                            "📝 MD", export_as_markdown(transcript, fname, meta),
-                            file_name=f"{fname}.md", mime="text/markdown",
-                            use_container_width=True, key=f"md_{tx['id']}"
+                            "MD",
+                            export_as_markdown(transcript, file_stem, meta),
+                            file_name=f"{file_stem}.md",
+                            mime="text/markdown",
+                            use_container_width=True,
+                            key=f"md_{tx['id']}",
                         )
                     with ec4:
                         try:
-                            docx_bytes = export_as_docx(transcript, fname, meta)
+                            docx_bytes = export_as_docx(transcript, file_stem, meta)
                             st.download_button(
-                                "📃 DOCX", docx_bytes,
-                                file_name=f"{fname}.docx",
+                                "DOCX",
+                                docx_bytes,
+                                file_name=f"{file_stem}.docx",
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                use_container_width=True, key=f"docx_{tx['id']}"
+                                use_container_width=True,
+                                key=f"docx_{tx['id']}",
                             )
                         except ImportError:
-                            st.caption("DOCX: install python-docx")
+                            st.caption("DOCX unavailable (install python-docx).")
                     with ec5:
                         st.download_button(
-                            "🗃️ CSV", export_as_csv([tx]),
-                            file_name=f"{fname}.csv", mime="text/csv",
-                            use_container_width=True, key=f"csv_{tx['id']}"
+                            "CSV",
+                            export_as_csv([tx]),
+                            file_name=f"{file_stem}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                            key=f"csv_{tx['id']}",
                         )
                 else:
                     st.info("No transcript to export.")
@@ -185,12 +234,11 @@ else:
                 with col_m2:
                     st.markdown(f"**Status:** {tx.get('status', 'N/A')}")
                     st.markdown(f"**Duration:** {render_duration_badge(tx.get('duration_seconds'))}")
-                    st.markdown(f"**Word Count:** {tx.get('word_count') or 0:,}")
+                    st.markdown(f"**Word Count:** {(tx.get('word_count') or 0):,}")
                     st.markdown(f"**Created:** {(tx.get('created_at') or '')[:19]}")
 
                 st.markdown("")
-                if st.button("🗑️ Delete this transcription", key=f"del_{tx['id']}",
-                              type="secondary"):
+                if st.button("Delete this transcription", key=f"del_{tx['id']}", type="secondary"):
                     delete_transcription(tx["id"])
                     st.warning("Transcription deleted.")
                     st.rerun()

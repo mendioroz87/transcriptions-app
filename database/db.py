@@ -97,6 +97,28 @@ def authenticate_user(username_or_email: str, password: str):
     conn.close()
     return dict(user) if user else None
 
+def reset_user_password(username_or_email: str, email: str, new_password: str):
+    conn = get_connection()
+    try:
+        user = conn.execute(
+            """SELECT id FROM users
+               WHERE (username=? OR email=?)
+               AND lower(email)=lower(?)""",
+            (username_or_email, username_or_email, email)
+        ).fetchone()
+
+        if not user:
+            return False, "No account matches those details."
+
+        conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (hash_password(new_password), user["id"])
+        )
+        conn.commit()
+        return True, "Password reset successful. Please sign in with your new password."
+    finally:
+        conn.close()
+
 def get_user_by_id(user_id: int):
     conn = get_connection()
     user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
@@ -146,6 +168,27 @@ def delete_project(project_id: int):
     conn.commit()
     conn.close()
 
+def delete_projects_bulk(project_ids: list[int]) -> int:
+    """Delete multiple projects and their transcriptions. Returns number deleted."""
+    if not project_ids:
+        return 0
+
+    conn = get_connection()
+    try:
+        q_marks = ",".join("?" for _ in project_ids)
+        conn.execute(
+            f"DELETE FROM transcriptions WHERE project_id IN ({q_marks})",
+            project_ids
+        )
+        cur = conn.execute(
+            f"DELETE FROM projects WHERE id IN ({q_marks})",
+            project_ids
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
 # --- TRANSCRIPTION OPERATIONS ---
 
 def create_transcription(project_id: int, filename: str, original_filename: str, model_used: str):
@@ -191,6 +234,23 @@ def delete_transcription(tid: int):
     conn.execute("DELETE FROM transcriptions WHERE id=?", (tid,))
     conn.commit()
     conn.close()
+
+def delete_transcriptions_bulk(transcription_ids: list[int]) -> int:
+    """Delete multiple transcriptions. Returns number deleted."""
+    if not transcription_ids:
+        return 0
+
+    conn = get_connection()
+    try:
+        q_marks = ",".join("?" for _ in transcription_ids)
+        cur = conn.execute(
+            f"DELETE FROM transcriptions WHERE id IN ({q_marks})",
+            transcription_ids
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
 
 # --- API KEYS ---
 
