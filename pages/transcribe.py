@@ -24,7 +24,14 @@ from database.db import (  # noqa: E402
     get_user_projects,
     update_transcription,
 )
-from transcription.engine import MODELS, TranscriptionUserError, check_model_requirements, transcribe  # noqa: E402
+from transcription.engine import (  # noqa: E402
+    DEFAULT_SUMMARY_PROMPT,
+    MODELS,
+    TranscriptionUserError,
+    check_model_requirements,
+    summarize_transcript_with_openai,
+    transcribe,
+)
 from utils.auth_ui import get_active_team_id, get_current_user, require_login  # noqa: E402
 from utils.components import render_duration_badge, sidebar_navigation  # noqa: E402
 
@@ -159,6 +166,68 @@ with col_config:
     )
     language_code = None if language == "Auto-detect" else language
 
+    st.markdown("")
+    summary_requested = st.checkbox(
+        "Generate transcript summary (OpenAI, low reasoning)",
+        value=False,
+        help="Uses your OpenAI key and the default MLabs summary prompt.",
+    )
+    summary_api_key = None
+    summary_prompt_template = DEFAULT_SUMMARY_PROMPT
+    if summary_requested:
+        summary_team_key = team_api_keys.get("openai") or ""
+        summary_user_key = user_api_keys.get("openai") or ""
+        summary_project_key = selected_project.get("api_key") if selected_model == "whisper" else ""
+
+        summary_sources = []
+        if summary_team_key:
+            summary_sources.append("Team OpenAI key")
+        if summary_user_key:
+            summary_sources.append("My OpenAI key")
+        if summary_project_key:
+            summary_sources.append("Project key")
+        summary_sources.append("Custom OpenAI key")
+
+        default_summary_source = "Custom OpenAI key"
+        if summary_team_key:
+            default_summary_source = "Team OpenAI key"
+        elif summary_user_key:
+            default_summary_source = "My OpenAI key"
+        elif summary_project_key:
+            default_summary_source = "Project key"
+
+        selected_summary_source = st.selectbox(
+            "Summary Key Source",
+            options=summary_sources,
+            index=summary_sources.index(default_summary_source),
+        )
+
+        if selected_summary_source == "Team OpenAI key":
+            summary_api_key = summary_team_key
+        elif selected_summary_source == "My OpenAI key":
+            summary_api_key = summary_user_key
+        elif selected_summary_source == "Project key":
+            summary_api_key = summary_project_key
+        else:
+            summary_api_key = st.text_input(
+                "OpenAI API Key (for summary)",
+                value="",
+                type="password",
+                help="Required only when summary is enabled.",
+            )
+
+        with st.expander("Summary Prompt", expanded=False):
+            st.text_area(
+                "Prompt Template",
+                value=summary_prompt_template,
+                height=320,
+                disabled=True,
+                help="Default summary prompt currently in use.",
+            )
+
+        if not summary_api_key:
+            st.warning("Summary requires a valid OpenAI API key.")
+
     st.info(
         "Long audio is split into 10-minute chunks and stitched after transcription."
     )
@@ -206,7 +275,11 @@ with col_upload:
             )
 
         st.markdown("")
-        can_transcribe = ((not model_info["requires_api_key"]) or bool(api_key)) and model_ready
+        can_transcribe = (
+            ((not model_info["requires_api_key"]) or bool(api_key))
+            and model_ready
+            and ((not summary_requested) or bool(summary_api_key))
+        )
 
         if st.button("Start Transcription", type="primary", use_container_width=True, disabled=not can_transcribe):
             progress_bar = st.progress(0, text="Preparing...")
@@ -244,6 +317,19 @@ with col_upload:
                     language=result.get("language"),
                 )
 
+                summary_result = None
+                summary_error = None
+                if summary_requested:
+                    update_progress(98, "Generating summary with OpenAI...")
+                    try:
+                        summary_result = summarize_transcript_with_openai(
+                            transcript=result["text"],
+                            api_key=summary_api_key,
+                            prompt_template=summary_prompt_template,
+                        )
+                    except Exception as summary_exc:
+                        summary_error = str(summary_exc)
+
                 progress_bar.progress(1.0, text="Transcription complete")
 
                 with result_area:
@@ -252,6 +338,13 @@ with col_upload:
                         f"language {result['language']}, chunks {result['chunks_processed']}"
                     )
                     st.text_area("Transcript", value=result["text"], height=300)
+                    if summary_requested:
+                        st.markdown("### Summary")
+                        if summary_result:
+                            st.caption(f"Generated with {summary_result['model_used']} (low reasoning mode).")
+                            st.text_area("Summary", value=summary_result["summary"], height=260)
+                        else:
+                            st.warning(f"Summary could not be generated: {summary_error}")
 
                     st.markdown("Download transcript:")
                     dc1, dc2, dc3 = st.columns(3)
@@ -266,9 +359,14 @@ with col_upload:
                     with dc2:
                         import json
 
+                        result_for_export = dict(result)
+                        if summary_result:
+                            result_for_export["summary"] = summary_result["summary"]
+                            result_for_export["summary_model"] = summary_result["model_used"]
+
                         st.download_button(
                             "JSON",
-                            json.dumps(result, indent=2).encode(),
+                            json.dumps(result_for_export, indent=2).encode(),
                             file_name=f"{uploaded_file.name}.json",
                             mime="application/json",
                             use_container_width=True,

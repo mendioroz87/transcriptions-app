@@ -49,6 +49,33 @@ MODELS = {
     },
 }
 
+SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
+DEFAULT_SUMMARY_PROMPT = """# Role
+You are an expert Information Architect and Transcription Analyst. Your goal is to transform raw transcripts into high-utility, structured summaries.
+
+# Task
+Analyze the provided transcript and follow this three-step execution plan:
+
+## Step 1: Classification & Framework Selection
+First, identify the nature of the transcript (e.g., Business Meeting, Qualitative Interview, Academic Lecture, Podcast, Legal Deposition, or Workshop). Based on this classification, select the most appropriate summary framework.
+
+## Step 2: Analysis
+Review the text for key themes, speaker intent, significant decisions, and recurring patterns.
+
+## Step 3: Structured Output
+Generate the summary using the selected framework. Regardless of the type, your output MUST include:
+1. **Metadata:** (Type of transcript, estimated duration, and list of speakers).
+2. **The "North Star" Summary:** A 2-sentence executive summary of the core purpose.
+3. **Structured Breakdown:** Use headings specific to the transcript type:
+   - *For Meetings:* Decisions Made, Action Items (with owners), and Blockers.
+   - *For Interviews:* Key Insights, Direct Quotes, and Participant Sentiment.
+   - *For Lectures/Podcasts:* Main Thesis, Key Concepts, and Further Reading/Action.
+4. **The "A-Ha" Moment:** One non-obvious insight or important subtext found in the transcript.
+
+# Context (Transcript Data)
+[PASTE YOUR TRANSCRIPT HERE]
+"""
+
 
 # ---------------------------------------------------------------------------
 # Model readiness checks
@@ -227,6 +254,89 @@ def transcribe_with_faster_whisper(audio_path: str, model_size: str = "base") ->
         "language": info.language,
         "segments": segment_list,
         "language_probability": info.language_probability,
+    }
+
+
+def _extract_openai_text(response) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return output_text.strip()
+
+    choices = getattr(response, "choices", None)
+    if choices:
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        content = getattr(message, "content", "") if message else ""
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    output_items = getattr(response, "output", None)
+    if output_items:
+        parts = []
+        for item in output_items:
+            content_items = getattr(item, "content", None) or []
+            for content_item in content_items:
+                text_value = getattr(content_item, "text", None)
+                if text_value:
+                    parts.append(text_value)
+        if parts:
+            return "\n".join(parts).strip()
+
+    return ""
+
+
+def summarize_transcript_with_openai(
+    transcript: str,
+    api_key: str,
+    prompt_template: str = DEFAULT_SUMMARY_PROMPT,
+    model: str = SUMMARY_MODEL,
+) -> dict:
+    if not api_key:
+        raise TranscriptionUserError("OpenAI API key is required to generate a summary.")
+    if not transcript or not transcript.strip():
+        raise TranscriptionUserError("Transcript is empty. Nothing to summarize.")
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise ImportError("openai package not installed. Run: pip install openai") from exc
+
+    client = OpenAI(api_key=api_key)
+    prompt = prompt_template.replace("[PASTE YOUR TRANSCRIPT HERE]", transcript.strip())
+
+    response = None
+    if hasattr(client, "responses"):
+        try:
+            response = client.responses.create(
+                model=model,
+                reasoning={"effort": "low"},
+                input=prompt,
+            )
+        except Exception:
+            response = client.responses.create(
+                model=model,
+                input=prompt,
+            )
+    else:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                reasoning_effort="low",
+            )
+        except Exception:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+    summary_text = _extract_openai_text(response)
+    if not summary_text:
+        raise RuntimeError("OpenAI returned an empty summary.")
+
+    return {
+        "summary": summary_text,
+        "model_used": model,
     }
 
 
