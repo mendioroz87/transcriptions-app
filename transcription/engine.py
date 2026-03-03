@@ -49,7 +49,7 @@ MODELS = {
     },
 }
 
-SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
+SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4.1-nano")
 DEFAULT_SUMMARY_PROMPT = """# Role
 You are an expert Information Architect and Transcription Analyst. Your goal is to transform raw transcripts into high-utility, structured summaries.
 
@@ -71,6 +71,14 @@ Generate the summary using the selected framework. Regardless of the type, your 
    - *For Interviews:* Key Insights, Direct Quotes, and Participant Sentiment.
    - *For Lectures/Podcasts:* Main Thesis, Key Concepts, and Further Reading/Action.
 4. **The "A-Ha" Moment:** One non-obvious insight or important subtext found in the transcript.
+
+# Output Constraints
+- The output language MUST be exactly: [TRANSCRIPT_LANGUAGE]
+- Make the summary highly detailed in every section of the selected framework.
+- Use precise, concrete points rather than generic statements.
+
+# Context (Transcript Metadata)
+Language from transcription metadata: [TRANSCRIPT_LANGUAGE]
 
 # Context (Transcript Data)
 [PASTE YOUR TRANSCRIPT HERE]
@@ -288,6 +296,7 @@ def _extract_openai_text(response) -> str:
 def summarize_transcript_with_openai(
     transcript: str,
     api_key: str,
+    transcript_language: str = "unknown",
     prompt_template: str = DEFAULT_SUMMARY_PROMPT,
     model: str = SUMMARY_MODEL,
 ) -> dict:
@@ -302,7 +311,9 @@ def summarize_transcript_with_openai(
         raise ImportError("openai package not installed. Run: pip install openai") from exc
 
     client = OpenAI(api_key=api_key)
-    prompt = prompt_template.replace("[PASTE YOUR TRANSCRIPT HERE]", transcript.strip())
+    prompt = prompt_template
+    prompt = prompt.replace("[TRANSCRIPT_LANGUAGE]", (transcript_language or "unknown").strip())
+    prompt = prompt.replace("[PASTE YOUR TRANSCRIPT HERE]", transcript.strip())
 
     response = None
     if hasattr(client, "responses"):

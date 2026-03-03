@@ -99,12 +99,32 @@ if search_query:
 
 if all_transcriptions:
     with st.expander(f"Bulk Export ({len(all_transcriptions)} records)"):
+        has_bulk_summary = any(bool(tx.get("summary_text")) for tx in all_transcriptions)
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            bulk_export_transcript_only = st.checkbox(
+                "Export transcription only",
+                value=True,
+                key="bulk_export_transcript_only",
+            )
+        with bc2:
+            bulk_export_with_summary = st.checkbox(
+                "Export transcription + summary",
+                value=has_bulk_summary,
+                disabled=not has_bulk_summary,
+                key="bulk_export_with_summary",
+            )
+        bulk_include_summary = bulk_export_with_summary and has_bulk_summary
+        if not bulk_export_transcript_only and not bulk_export_with_summary:
+            st.warning("Select at least one export mode.")
+
         st.download_button(
             "Export all as CSV",
-            data=export_as_csv(all_transcriptions),
+            data=export_as_csv(all_transcriptions, include_summary=bulk_include_summary),
             file_name="mlabs_transcriptions.csv",
             mime="text/csv",
             use_container_width=True,
+            disabled=not (bulk_export_transcript_only or bulk_export_with_summary),
         )
 
     with st.expander(f"Bulk Remove ({len(all_transcriptions)} records)", expanded=False):
@@ -154,6 +174,7 @@ else:
             tab_text, tab_export, tab_meta = st.tabs(["Transcript", "Export", "Metadata"])
 
             transcript = tx.get("transcript") or ""
+            summary_text = tx.get("summary_text") or ""
 
             with tab_text:
                 if transcript:
@@ -164,11 +185,38 @@ else:
                         key=f"text_{tx['id']}",
                         label_visibility="collapsed",
                     )
+                    if summary_text:
+                        st.markdown("#### Summary")
+                        st.text_area(
+                            "Summary",
+                            value=summary_text,
+                            height=200,
+                            key=f"summary_{tx['id']}",
+                            label_visibility="collapsed",
+                        )
                 else:
                     st.info("No transcript available yet.")
 
             with tab_export:
                 if transcript:
+                    ecfg1, ecfg2 = st.columns(2)
+                    with ecfg1:
+                        tx_export_transcript_only = st.checkbox(
+                            "Export transcription only",
+                            value=True,
+                            key=f"tx_export_only_{tx['id']}",
+                        )
+                    with ecfg2:
+                        tx_export_with_summary = st.checkbox(
+                            "Export transcription + summary",
+                            value=bool(summary_text),
+                            disabled=not bool(summary_text),
+                            key=f"tx_export_both_{tx['id']}",
+                        )
+                    include_summary_in_export = tx_export_with_summary and bool(summary_text)
+                    if not tx_export_transcript_only and not tx_export_with_summary:
+                        st.warning("Select at least one export mode.")
+
                     st.markdown("**Choose export format:**")
                     ec1, ec2, ec3, ec4, ec5 = st.columns(5)
 
@@ -183,33 +231,53 @@ else:
                     with ec1:
                         st.download_button(
                             "TXT",
-                            export_as_txt(transcript, file_stem),
+                            export_as_txt(
+                                transcript,
+                                file_stem,
+                                summary_text=summary_text,
+                                include_summary=include_summary_in_export,
+                            ),
                             file_name=f"{file_stem}.txt",
                             mime="text/plain",
                             use_container_width=True,
                             key=f"txt_{tx['id']}",
+                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
                         )
                     with ec2:
                         st.download_button(
                             "JSON",
-                            export_as_json(tx),
+                            export_as_json(tx, include_summary=include_summary_in_export),
                             file_name=f"{file_stem}.json",
                             mime="application/json",
                             use_container_width=True,
                             key=f"json_{tx['id']}",
+                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
                         )
                     with ec3:
                         st.download_button(
                             "MD",
-                            export_as_markdown(transcript, file_stem, meta),
+                            export_as_markdown(
+                                transcript,
+                                file_stem,
+                                meta,
+                                summary_text=summary_text,
+                                include_summary=include_summary_in_export,
+                            ),
                             file_name=f"{file_stem}.md",
                             mime="text/markdown",
                             use_container_width=True,
                             key=f"md_{tx['id']}",
+                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
                         )
                     with ec4:
                         try:
-                            docx_bytes = export_as_docx(transcript, file_stem, meta)
+                            docx_bytes = export_as_docx(
+                                transcript,
+                                file_stem,
+                                meta,
+                                summary_text=summary_text,
+                                include_summary=include_summary_in_export,
+                            )
                             st.download_button(
                                 "DOCX",
                                 docx_bytes,
@@ -217,17 +285,19 @@ else:
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                 use_container_width=True,
                                 key=f"docx_{tx['id']}",
+                                disabled=not (tx_export_transcript_only or tx_export_with_summary),
                             )
                         except ImportError:
                             st.caption("DOCX unavailable (install python-docx).")
                     with ec5:
                         st.download_button(
                             "CSV",
-                            export_as_csv([tx]),
+                            export_as_csv([tx], include_summary=include_summary_in_export),
                             file_name=f"{file_stem}.csv",
                             mime="text/csv",
                             use_container_width=True,
                             key=f"csv_{tx['id']}",
+                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
                         )
                 else:
                     st.info("No transcript to export.")

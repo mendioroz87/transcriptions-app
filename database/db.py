@@ -138,6 +138,10 @@ def _migrate_team_data(conn):
             (team_id, user_id),
         )
 
+def _migrate_transcription_data(conn):
+    if "summary_text" not in _table_columns(conn, "transcriptions"):
+        conn.execute("ALTER TABLE transcriptions ADD COLUMN summary_text TEXT")
+
 def _get_bootstrap_password_hash() -> str:
     if BOOTSTRAP_OWNER_PASSWORD:
         return hash_password(BOOTSTRAP_OWNER_PASSWORD)
@@ -254,6 +258,7 @@ def init_db():
             model_used TEXT,
             status TEXT DEFAULT 'pending',
             transcript TEXT,
+            summary_text TEXT,
             word_count INTEGER,
             language TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -301,6 +306,7 @@ def init_db():
     """)
 
     _migrate_team_data(conn)
+    _migrate_transcription_data(conn)
     _ensure_bootstrap_owner(conn)
     cursor.executescript("""
         CREATE INDEX IF NOT EXISTS idx_projects_team_id ON projects(team_id);
@@ -958,14 +964,30 @@ def create_transcription(
     finally:
         conn.close()
 
-def update_transcription(tid: int, transcript: str, status: str, duration: float = None,
-                          word_count: int = None, language: str = None):
+def update_transcription(
+    tid: int,
+    transcript: str,
+    status: str,
+    duration: float = None,
+    word_count: int = None,
+    language: str = None,
+    summary_text: str = None,
+):
     conn = get_connection()
     try:
         conn.execute(
             """UPDATE transcriptions SET transcript=?, status=?, duration_seconds=?,
-               word_count=?, language=?, completed_at=? WHERE id=?""",
-            (transcript, status, duration, word_count, language, _utc_now_iso(), tid),
+               word_count=?, language=?, summary_text=?, completed_at=? WHERE id=?""",
+            (
+                transcript,
+                status,
+                duration,
+                word_count,
+                language,
+                summary_text,
+                _utc_now_iso(),
+                tid,
+            ),
         )
         conn.commit()
     finally:

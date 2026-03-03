@@ -24,6 +24,7 @@ from database.db import (  # noqa: E402
     get_user_projects,
     update_transcription,
 )
+from exports.exporter import export_as_json, export_as_txt  # noqa: E402
 from transcription.engine import (  # noqa: E402
     DEFAULT_SUMMARY_PROMPT,
     MODELS,
@@ -308,15 +309,6 @@ with col_upload:
                     progress_callback=update_progress,
                 )
 
-                update_transcription(
-                    tid=tid,
-                    transcript=result["text"],
-                    status="completed",
-                    duration=result.get("duration"),
-                    word_count=result.get("word_count"),
-                    language=result.get("language"),
-                )
-
                 summary_result = None
                 summary_error = None
                 if summary_requested:
@@ -325,10 +317,22 @@ with col_upload:
                         summary_result = summarize_transcript_with_openai(
                             transcript=result["text"],
                             api_key=summary_api_key,
+                            transcript_language=result.get("language"),
                             prompt_template=summary_prompt_template,
                         )
                     except Exception as summary_exc:
                         summary_error = str(summary_exc)
+
+                summary_text_value = summary_result["summary"] if summary_result else None
+                update_transcription(
+                    tid=tid,
+                    transcript=result["text"],
+                    status="completed",
+                    duration=result.get("duration"),
+                    word_count=result.get("word_count"),
+                    language=result.get("language"),
+                    summary_text=summary_text_value,
+                )
 
                 progress_bar.progress(1.0, text="Transcription complete")
 
@@ -346,19 +350,42 @@ with col_upload:
                         else:
                             st.warning(f"Summary could not be generated: {summary_error}")
 
-                    st.markdown("Download transcript:")
+                    st.markdown("Download options:")
+                    col_export_checks = st.columns(2)
+                    with col_export_checks[0]:
+                        export_transcript_only = st.checkbox(
+                            "Export transcription only",
+                            value=True,
+                            key=f"tx_only_export_{tid}",
+                        )
+                    with col_export_checks[1]:
+                        export_transcript_and_summary = st.checkbox(
+                            "Export transcription + summary",
+                            value=bool(summary_result),
+                            disabled=not bool(summary_result),
+                            key=f"tx_plus_summary_export_{tid}",
+                        )
+
+                    include_summary_in_exports = export_transcript_and_summary and bool(summary_result)
+                    if not export_transcript_only and not export_transcript_and_summary:
+                        st.warning("Select at least one export mode.")
+
                     dc1, dc2, dc3 = st.columns(3)
                     with dc1:
                         st.download_button(
                             "TXT",
-                            result["text"].encode(),
+                            export_as_txt(
+                                result["text"],
+                                title=uploaded_file.name,
+                                summary_text=summary_text_value or "",
+                                include_summary=include_summary_in_exports,
+                            ),
                             file_name=f"{uploaded_file.name}.txt",
                             mime="text/plain",
                             use_container_width=True,
+                            disabled=not (export_transcript_only or export_transcript_and_summary),
                         )
                     with dc2:
-                        import json
-
                         result_for_export = dict(result)
                         if summary_result:
                             result_for_export["summary"] = summary_result["summary"]
@@ -366,10 +393,14 @@ with col_upload:
 
                         st.download_button(
                             "JSON",
-                            json.dumps(result_for_export, indent=2).encode(),
+                            export_as_json(
+                                result_for_export,
+                                include_summary=include_summary_in_exports,
+                            ),
                             file_name=f"{uploaded_file.name}.json",
                             mime="application/json",
                             use_container_width=True,
+                            disabled=not (export_transcript_only or export_transcript_and_summary),
                         )
                     with dc3:
                         if st.button("Full Export Options", use_container_width=True):
