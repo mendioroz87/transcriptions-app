@@ -73,11 +73,51 @@ def render_status_badge(status: str) -> str:
 
 def sidebar_navigation():
     """Render sidebar navigation and logout."""
-    from utils.auth_ui import get_current_user, logout
+    from database.db import get_user_teams
+    from utils.auth_ui import (
+        ensure_active_team,
+        get_active_team_id,
+        get_current_user,
+        logout,
+        set_active_team_id,
+    )
 
     user = get_current_user()
     if user:
+        ensure_active_team()
+        teams = get_user_teams(user["id"])
+
         st.sidebar.markdown(f"### \U0001F464 {user['username']}")
+        if teams:
+            team_ids = [team["id"] for team in teams]
+            team_map = {team["id"]: team for team in teams}
+            active_team_id = get_active_team_id()
+            if active_team_id not in team_map:
+                active_team_id = team_ids[0]
+                set_active_team_id(active_team_id)
+
+            selected_team_id = st.sidebar.selectbox(
+                "Active Team",
+                options=team_ids,
+                format_func=lambda tid: team_map[tid].get("team_name") or team_map[tid]["name"],
+                index=team_ids.index(active_team_id),
+            )
+            if selected_team_id != active_team_id:
+                set_active_team_id(selected_team_id)
+                st.session_state.pop("current_project", None)
+                st.rerun()
+
+            active_team = team_map[selected_team_id]
+            if active_team.get("is_owner"):
+                role_label = "Owner"
+            elif active_team.get("can_edit_team_api_keys"):
+                role_label = "Team Key Manager"
+            elif active_team.get("can_edit_personal_api_keys"):
+                role_label = "Personal Key Manager"
+            else:
+                role_label = "Member"
+            st.sidebar.caption(f"Role: {role_label}")
+
         st.sidebar.markdown("---")
         _safe_page_link("app.py", label="\U0001F3E0 Dashboard")
         _safe_page_link("pages/projects.py", label="\U0001F4C1 My Projects")

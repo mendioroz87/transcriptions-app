@@ -9,8 +9,8 @@ import os
 # Make sure sub-packages are importable
 sys.path.insert(0, os.path.dirname(__file__))
 
-from database.db import init_db, get_user_projects, get_project_transcriptions
-from utils.auth_ui import is_logged_in, render_login_form, get_current_user
+from database.db import get_project_transcriptions, get_user_projects, get_user_team, init_db
+from utils.auth_ui import get_active_team_id, get_current_user, is_logged_in, render_login_form
 from utils.components import sidebar_navigation, render_duration_badge, render_status_badge
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -95,19 +95,26 @@ if not is_logged_in():
 else:
     # ── Dashboard ────────────────────────────────────────────────────────────
     user = get_current_user()
+    active_team_id = get_active_team_id()
+    active_team = get_user_team(user["id"], active_team_id) if active_team_id else None
+    if not active_team:
+        st.error("No active team is available for this account.")
+        st.stop()
+
+    active_team_name = active_team.get("team_name") or active_team.get("name") or "Team"
     st.markdown(f'<p class="main-title">Welcome, {user["username"]}!</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">MLabs Transcription Dashboard</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="subtitle">{active_team_name} Dashboard</p>', unsafe_allow_html=True)
     st.markdown("")
 
     # Load user data
-    projects = get_user_projects(user["id"])
+    projects = get_user_projects(user["id"], team_id=active_team_id)
 
     # Aggregate stats
     total_transcriptions = 0
     total_words = 0
     total_duration = 0
     for project in projects:
-        txs = get_project_transcriptions(project["id"])
+        txs = get_project_transcriptions(project["id"], acting_user_id=user["id"])
         total_transcriptions += len(txs)
         for tx in txs:
             total_words += tx.get("word_count") or 0
@@ -154,7 +161,7 @@ else:
         st.subheader("📜 Recent Activity")
         recent = []
         for project in projects:
-            txs = get_project_transcriptions(project["id"])
+            txs = get_project_transcriptions(project["id"], acting_user_id=user["id"])
             for tx in txs:
                 tx["project_name"] = project["name"]
                 recent.append(tx)

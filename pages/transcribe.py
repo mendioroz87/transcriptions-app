@@ -18,12 +18,14 @@ from audio.processor import (  # noqa: E402
 )
 from database.db import (  # noqa: E402
     create_transcription,
+    get_team_api_keys,
     get_user_api_keys,
+    get_user_team,
     get_user_projects,
     update_transcription,
 )
 from transcription.engine import MODELS, TranscriptionUserError, check_model_requirements, transcribe  # noqa: E402
-from utils.auth_ui import get_current_user, require_login  # noqa: E402
+from utils.auth_ui import get_active_team_id, get_current_user, require_login  # noqa: E402
 from utils.components import render_duration_badge, sidebar_navigation  # noqa: E402
 
 
@@ -32,11 +34,19 @@ sidebar_navigation()
 require_login()
 
 user = get_current_user()
+active_team_id = get_active_team_id()
+active_team = get_user_team(user["id"], active_team_id) if active_team_id else None
+if not active_team:
+    st.error("No active team is available for this account.")
+    st.stop()
+
+team_name = active_team.get("team_name") or active_team.get("name") or "Team"
 user_api_keys = get_user_api_keys(user["id"])
-projects = get_user_projects(user["id"])
+team_api_keys = get_team_api_keys(active_team_id, acting_user_id=user["id"])
+projects = get_user_projects(user["id"], team_id=active_team_id)
 
 st.title("New Transcription")
-st.caption("Upload audio and transcribe it with your selected model.")
+st.caption(f"Team: {team_name}. Upload audio and transcribe it with your selected model.")
 
 if not check_ffmpeg():
     st.error(
@@ -97,14 +107,48 @@ with col_config:
             "elevenlabs_scribe_v2": "elevenlabs",
         }
         provider = provider_map.get(selected_model, selected_model)
-        saved_key = user_api_keys.get(provider) or selected_project.get("api_key") or ""
+        team_key = team_api_keys.get(provider) or ""
+        user_key = user_api_keys.get(provider) or ""
+        project_key = selected_project.get("api_key") or ""
 
-        api_key = st.text_input(
-            model_info["api_key_label"],
-            value=saved_key,
-            type="password",
-            help="This key is not saved unless you store it in Settings.",
+        key_source_labels = []
+        if team_key:
+            key_source_labels.append("Team key")
+        if user_key:
+            key_source_labels.append("My key")
+        if project_key:
+            key_source_labels.append("Project key")
+        key_source_labels.append("Custom key")
+
+        default_source = "Custom key"
+        if team_key:
+            default_source = "Team key"
+        elif user_key:
+            default_source = "My key"
+        elif project_key:
+            default_source = "Project key"
+
+        selected_source = st.selectbox(
+            "API Key Source",
+            options=key_source_labels,
+            index=key_source_labels.index(default_source),
+            help="Choose whether to use the active team key, your personal key, project key, or a one-off key.",
         )
+
+        if selected_source == "Team key":
+            api_key = team_key
+        elif selected_source == "My key":
+            api_key = user_key
+        elif selected_source == "Project key":
+            api_key = project_key
+        else:
+            api_key = st.text_input(
+                model_info["api_key_label"],
+                value="",
+                type="password",
+                help="This key is used for this run only unless saved in Settings.",
+            )
+
         if not api_key:
             st.warning(f"An API key is required for {model_info['label']}.")
 
@@ -180,6 +224,7 @@ with col_upload:
                     filename=os.path.basename(wav_path),
                     original_filename=uploaded_file.name,
                     model_used=selected_model,
+                    acting_user_id=user["id"],
                 )
 
                 result = transcribe(

@@ -13,6 +13,7 @@ from database.db import (  # noqa: E402
     delete_transcription,
     delete_transcriptions_bulk,
     get_project_transcriptions,
+    get_user_team,
     get_user_projects,
 )
 from exports.exporter import (  # noqa: E402
@@ -22,7 +23,7 @@ from exports.exporter import (  # noqa: E402
     export_as_markdown,
     export_as_txt,
 )
-from utils.auth_ui import get_current_user, require_login  # noqa: E402
+from utils.auth_ui import get_active_team_id, get_current_user, require_login  # noqa: E402
 from utils.components import render_duration_badge, render_status_badge, sidebar_navigation  # noqa: E402
 
 
@@ -31,10 +32,17 @@ sidebar_navigation()
 require_login()
 
 user = get_current_user()
-projects = get_user_projects(user["id"])
+active_team_id = get_active_team_id()
+active_team = get_user_team(user["id"], active_team_id) if active_team_id else None
+if not active_team:
+    st.error("No active team is available for this account.")
+    st.stop()
+
+team_name = active_team.get("team_name") or active_team.get("name") or "Team"
+projects = get_user_projects(user["id"], team_id=active_team_id)
 
 st.title("Transcription History")
-st.caption("Browse, search, export, and remove your transcriptions.")
+st.caption(f"Team: {team_name}. Browse, search, export, and remove transcriptions.")
 st.markdown("---")
 
 if not projects:
@@ -71,7 +79,7 @@ for project in projects:
     if selected_project_id and project["id"] != selected_project_id:
         continue
 
-    for transcription in get_project_transcriptions(project["id"]):
+    for transcription in get_project_transcriptions(project["id"], acting_user_id=user["id"]):
         transcription["project_name"] = project["name"]
         all_transcriptions.append(transcription)
 
@@ -123,7 +131,7 @@ if all_transcriptions:
             key="bulk_delete_transcriptions_btn",
         ):
             selected_ids = [tx_label_to_id[label] for label in selected_labels]
-            deleted_count = delete_transcriptions_bulk(selected_ids)
+            deleted_count = delete_transcriptions_bulk(selected_ids, acting_user_id=user["id"])
             st.warning(f"Deleted {deleted_count} transcription(s).")
             st.rerun()
 
@@ -239,6 +247,6 @@ else:
 
                 st.markdown("")
                 if st.button("Delete this transcription", key=f"del_{tx['id']}", type="secondary"):
-                    delete_transcription(tx["id"])
+                    delete_transcription(tx["id"], acting_user_id=user["id"])
                     st.warning("Transcription deleted.")
                     st.rerun()

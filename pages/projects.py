@@ -10,11 +10,12 @@ from database.db import (  # noqa: E402
     delete_project,
     delete_projects_bulk,
     get_project_transcriptions,
+    get_user_team,
     get_user_projects,
     update_project,
 )
 from transcription.engine import MODELS  # noqa: E402
-from utils.auth_ui import get_current_user, require_login  # noqa: E402
+from utils.auth_ui import get_active_team_id, get_current_user, require_login  # noqa: E402
 from utils.components import render_duration_badge, render_status_badge, sidebar_navigation  # noqa: E402
 
 
@@ -23,9 +24,21 @@ sidebar_navigation()
 require_login()
 
 user = get_current_user()
+active_team_id = get_active_team_id()
+active_team = get_user_team(user["id"], active_team_id) if active_team_id else None
+if not active_team:
+    st.error("No active team is available for this account.")
+    st.stop()
+
+team_name = active_team.get("team_name") or active_team.get("name") or "Team"
+can_manage_any_key = bool(
+    active_team.get("is_owner")
+    or active_team.get("can_edit_personal_api_keys")
+    or active_team.get("can_edit_team_api_keys")
+)
 
 st.title("My Projects")
-st.caption("Organize transcriptions into projects and remove projects when no longer needed.")
+st.caption(f"Team: {team_name}. Organize transcriptions and remove projects when no longer needed.")
 st.markdown("---")
 
 with st.expander("Create New Project", expanded=False):
@@ -42,29 +55,39 @@ with st.expander("Create New Project", expanded=False):
 
         p_api_key = None
         if MODELS[p_model]["requires_api_key"]:
-            p_api_key = st.text_input(
-                f"{MODELS[p_model]['api_key_label']} (optional)",
-                type="password",
-                help="Stored only for this project.",
-            )
+            if can_manage_any_key:
+                p_api_key = st.text_input(
+                    f"{MODELS[p_model]['api_key_label']} (optional)",
+                    type="password",
+                    help="Stored only for this project.",
+                )
+            else:
+                st.caption("Your role cannot store project API keys.")
 
         submitted = st.form_submit_button("Create Project", type="primary", use_container_width=True)
         if submitted:
             if not p_name.strip():
                 st.error("Project name is required.")
             else:
-                create_project(user["id"], p_name.strip(), p_desc.strip(), p_model, p_api_key or None)
+                create_project(
+                    user["id"],
+                    p_name.strip(),
+                    p_desc.strip(),
+                    p_model,
+                    p_api_key or None,
+                    team_id=active_team_id,
+                )
                 st.success(f"Project '{p_name}' created.")
                 st.rerun()
 
 st.markdown("")
-projects = get_user_projects(user["id"])
+projects = get_user_projects(user["id"], team_id=active_team_id)
 
 if not projects:
     st.info("No projects yet. Create your first project above.")
 else:
     for project in projects:
-        transcriptions = get_project_transcriptions(project["id"])
+        transcriptions = get_project_transcriptions(project["id"], acting_user_id=user["id"])
         completed = [tx for tx in transcriptions if tx["status"] == "completed"]
         total_words = sum((tx.get("word_count") or 0) for tx in completed)
         total_dur = sum((tx.get("duration_seconds") or 0) for tx in completed)
@@ -108,19 +131,34 @@ else:
                             index=model_keys.index(project["model"]) if project["model"] in model_keys else 0,
                         )
                         if MODELS[new_model]["requires_api_key"]:
-                            new_key = st.text_input("API Key", type="password", value=project.get("api_key") or "")
+                            if can_manage_any_key:
+                                new_key = st.text_input(
+                                    "API Key",
+                                    type="password",
+                                    value=project.get("api_key") or "",
+                                )
+                            else:
+                                new_key = project.get("api_key") or None
+                                st.caption("Your role cannot edit project API keys.")
                         else:
                             new_key = None
 
                         c1, c2 = st.columns(2)
                         with c1:
                             if st.form_submit_button("Save", use_container_width=True):
-                                update_project(project["id"], new_name, new_desc, new_model, new_key)
+                                update_project(
+                                    project["id"],
+                                    new_name,
+                                    new_desc,
+                                    new_model,
+                                    new_key,
+                                    acting_user_id=user["id"],
+                                )
                                 st.success("Saved.")
                                 st.rerun()
                         with c2:
                             if st.form_submit_button("Delete", use_container_width=True):
-                                delete_project(project["id"])
+                                delete_project(project["id"], acting_user_id=user["id"])
                                 st.warning("Project deleted.")
                                 st.rerun()
 
@@ -160,7 +198,7 @@ else:
             key="bulk_delete_projects_btn",
         ):
             selected_ids = [project_label_to_id[label] for label in selected_labels]
-            deleted_count = delete_projects_bulk(selected_ids)
+            deleted_count = delete_projects_bulk(selected_ids, acting_user_id=user["id"])
             if (
                 "current_project" in st.session_state
                 and st.session_state["current_project"]["id"] in selected_ids
