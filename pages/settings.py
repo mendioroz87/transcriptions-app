@@ -33,8 +33,8 @@ from utils.auth_ui import get_active_team_id, get_current_user, require_login, s
 from utils.components import sidebar_navigation
 
 st.set_page_config(page_title="Settings - MLabs", page_icon="S", layout="wide")
-sidebar_navigation()
 require_login()
+sidebar_navigation()
 
 user = get_current_user()
 active_team_id = get_active_team_id()

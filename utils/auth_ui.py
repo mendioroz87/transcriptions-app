@@ -49,6 +49,19 @@ def ensure_active_team():
     return default_team_id
 
 
+def hide_sidebar_for_logged_out():
+    st.markdown(
+        """
+        <style>
+            section[data-testid="stSidebar"] {display: none !important;}
+            [data-testid="stSidebarNav"] {display: none !important;}
+            [data-testid="collapsedControl"] {display: none !important;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def login(username_or_email: str, password: str) -> bool:
     user = authenticate_user(username_or_email, password)
     if user:
@@ -68,6 +81,7 @@ def logout():
 def require_login():
     """Call at the top of any page that requires authentication."""
     if not is_logged_in():
+        hide_sidebar_for_logged_out()
         st.warning("Please log in to access this page.")
         st.stop()
     ensure_active_team()

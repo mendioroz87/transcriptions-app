@@ -28,8 +28,8 @@ from utils.components import render_duration_badge, render_status_badge, sidebar
 
 
 st.set_page_config(page_title="History - MLabs", page_icon="H", layout="wide")
-sidebar_navigation()
 require_login()
+sidebar_navigation()
 
 user = get_current_user()
 active_team_id = get_active_team_id()

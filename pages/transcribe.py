@@ -30,8 +30,8 @@ from utils.components import render_duration_badge, sidebar_navigation  # noqa: 
 
 
 st.set_page_config(page_title="Transcribe - MLabs", page_icon="T", layout="wide")
-sidebar_navigation()
 require_login()
+sidebar_navigation()
 
 user = get_current_user()
 active_team_id = get_active_team_id()

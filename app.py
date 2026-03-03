@@ -10,7 +10,13 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from database.db import get_project_transcriptions, get_user_projects, get_user_team, init_db
-from utils.auth_ui import get_active_team_id, get_current_user, is_logged_in, render_login_form
+from utils.auth_ui import (
+    get_active_team_id,
+    get_current_user,
+    hide_sidebar_for_logged_out,
+    is_logged_in,
+    render_login_form,
+)
 from utils.components import sidebar_navigation, render_duration_badge, render_status_badge
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -66,10 +72,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
-sidebar_navigation()
 
 # ── Main Content ──────────────────────────────────────────────────────────────
 if not is_logged_in():
+    hide_sidebar_for_logged_out()
+
     # Hero section
     col1, col2 = st.columns([1.2, 1], gap="large")
     with col1:
@@ -89,10 +96,12 @@ if not is_logged_in():
             st.markdown(f"**{icon} {title}** — {desc}")
 
     with col2:
-        st.markdown("### Get Started")
+        st.markdown("### Welcome")
+        st.caption("Sign in to access your team workspace.")
         render_login_form()
 
 else:
+    sidebar_navigation()
     # ── Dashboard ────────────────────────────────────────────────────────────
     user = get_current_user()
     active_team_id = get_active_team_id()
@@ -183,3 +192,4 @@ else:
                     st.markdown(f"**Words:** {(tx.get('word_count') or 0):,}")
     else:
         st.info("No transcriptions yet. Start by creating a project and uploading an audio file!")
+

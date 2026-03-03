@@ -2,16 +2,27 @@ name: MLabs Transcription CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, Development ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, Development ]
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout pull request head commit
+      if: github.event_name == 'pull_request'
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 1
+
+    - name: Checkout branch push commit
+      if: github.event_name != 'pull_request'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
 
     - name: Set up Python
       uses: actions/setup-python@v5
