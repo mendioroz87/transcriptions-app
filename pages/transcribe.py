@@ -5,8 +5,10 @@ Transcription Page - Upload audio, select model, run transcription.
 import os
 import sys
 import tempfile
+import mimetypes
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -35,6 +37,51 @@ from transcription.engine import (  # noqa: E402
 )
 from utils.auth_ui import get_active_team_id, get_current_user, require_login  # noqa: E402
 from utils.components import render_duration_badge, sidebar_navigation  # noqa: E402
+
+
+def render_audio_preview_player(audio_path: str, original_filename: str, key_prefix: str):
+    """Render an audio preview player with explicit playback speed and volume controls."""
+    mime_type = mimetypes.guess_type(original_filename)[0] or "audio/wav"
+    st.audio(audio_path, format=mime_type)
+
+    col_speed, col_volume = st.columns(2)
+    with col_speed:
+        playback_speed = st.select_slider(
+            "Speed",
+            options=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+            value=1.0,
+            key=f"{key_prefix}_speed",
+        )
+    with col_volume:
+        volume_percent = st.slider(
+            "Volume",
+            min_value=0,
+            max_value=100,
+            value=100,
+            step=5,
+            key=f"{key_prefix}_volume",
+        )
+
+    # Apply controls to audio elements rendered by Streamlit.
+    components.html(
+        f"""
+        <script>
+        const speed = {float(playback_speed)};
+        const volume = {float(volume_percent) / 100.0};
+        const applyPlaybackSettings = () => {{
+            const players = window.parent.document.querySelectorAll("audio");
+            players.forEach((player) => {{
+                player.playbackRate = speed;
+                player.volume = Math.max(0, Math.min(volume, 1));
+            }});
+        }};
+        applyPlaybackSettings();
+        setTimeout(applyPlaybackSettings, 200);
+        setTimeout(applyPlaybackSettings, 900);
+        </script>
+        """,
+        height=0,
+    )
 
 
 st.set_page_config(page_title="Transcribe - MLabs", page_icon="T", layout="wide")
@@ -281,136 +328,146 @@ with col_upload:
             and model_ready
             and ((not summary_requested) or bool(summary_api_key))
         )
+        playback_container = st.container(border=True)
+        with playback_container:
+            st.caption("Preview audio")
+            player_key_prefix = f"preview_{selected_pid}_{uploaded_file.name}_{uploaded_file.size}"
+            render_audio_preview_player(
+                audio_path=raw_path,
+                original_filename=uploaded_file.name,
+                key_prefix=player_key_prefix,
+            )
 
-        if st.button("Start Transcription", type="primary", use_container_width=True, disabled=not can_transcribe):
-            progress_bar = st.progress(0, text="Preparing...")
-            result_area = st.container()
+            st.markdown("")
+            if st.button("Start Transcription", type="primary", use_container_width=True, disabled=not can_transcribe):
+                progress_bar = st.progress(0, text="Preparing...")
+                result_area = st.container()
 
-            def update_progress(pct: int, msg: str):
-                progress_bar.progress(pct / 100, text=msg)
+                def update_progress(pct: int, msg: str):
+                    progress_bar.progress(pct / 100, text=msg)
 
-            try:
-                update_progress(3, "Converting audio via FFmpeg...")
-                wav_path, _audio_info = process_uploaded_file(uploaded_file, tmp_dir)
+                try:
+                    update_progress(3, "Converting audio via FFmpeg...")
+                    wav_path, _audio_info = process_uploaded_file(uploaded_file, tmp_dir)
 
-                tid = create_transcription(
-                    project_id=selected_pid,
-                    filename=os.path.basename(wav_path),
-                    original_filename=uploaded_file.name,
-                    model_used=selected_model,
-                    acting_user_id=user["id"],
-                )
-
-                result = transcribe(
-                    audio_path=wav_path,
-                    model=selected_model,
-                    api_key=api_key,
-                    language=language_code,
-                    progress_callback=update_progress,
-                )
-
-                summary_result = None
-                summary_error = None
-                if summary_requested:
-                    update_progress(98, "Generating summary with OpenAI...")
-                    try:
-                        summary_result = summarize_transcript_with_openai(
-                            transcript=result["text"],
-                            api_key=summary_api_key,
-                            transcript_language=result.get("language"),
-                            prompt_template=summary_prompt_template,
-                        )
-                    except Exception as summary_exc:
-                        summary_error = str(summary_exc)
-
-                summary_text_value = summary_result["summary"] if summary_result else None
-                update_transcription(
-                    tid=tid,
-                    transcript=result["text"],
-                    status="completed",
-                    duration=result.get("duration"),
-                    word_count=result.get("word_count"),
-                    language=result.get("language"),
-                    summary_text=summary_text_value,
-                )
-
-                progress_bar.progress(1.0, text="Transcription complete")
-
-                with result_area:
-                    st.success(
-                        f"Transcription complete: {result['word_count']:,} words, "
-                        f"language {result['language']}, chunks {result['chunks_processed']}"
+                    tid = create_transcription(
+                        project_id=selected_pid,
+                        filename=os.path.basename(wav_path),
+                        original_filename=uploaded_file.name,
+                        model_used=selected_model,
+                        acting_user_id=user["id"],
                     )
-                    st.text_area("Transcript", value=result["text"], height=300)
+
+                    result = transcribe(
+                        audio_path=wav_path,
+                        model=selected_model,
+                        api_key=api_key,
+                        language=language_code,
+                        progress_callback=update_progress,
+                    )
+
+                    summary_result = None
+                    summary_error = None
                     if summary_requested:
-                        st.markdown("### Summary")
-                        if summary_result:
-                            st.caption(f"Generated with {summary_result['model_used']} (low reasoning mode).")
-                            st.text_area("Summary", value=summary_result["summary"], height=260)
-                        else:
-                            st.warning(f"Summary could not be generated: {summary_error}")
+                        update_progress(98, "Generating summary with OpenAI...")
+                        try:
+                            summary_result = summarize_transcript_with_openai(
+                                transcript=result["text"],
+                                api_key=summary_api_key,
+                                transcript_language=result.get("language"),
+                                prompt_template=summary_prompt_template,
+                            )
+                        except Exception as summary_exc:
+                            summary_error = str(summary_exc)
 
-                    st.markdown("Download options:")
-                    col_export_checks = st.columns(2)
-                    with col_export_checks[0]:
-                        export_transcript_only = st.checkbox(
-                            "Export transcription only",
-                            value=True,
-                            key=f"tx_only_export_{tid}",
+                    summary_text_value = summary_result["summary"] if summary_result else None
+                    update_transcription(
+                        tid=tid,
+                        transcript=result["text"],
+                        status="completed",
+                        duration=result.get("duration"),
+                        word_count=result.get("word_count"),
+                        language=result.get("language"),
+                        summary_text=summary_text_value,
+                    )
+
+                    progress_bar.progress(1.0, text="Transcription complete")
+
+                    with result_area:
+                        st.success(
+                            f"Transcription complete: {result['word_count']:,} words, "
+                            f"language {result['language']}, chunks {result['chunks_processed']}"
                         )
-                    with col_export_checks[1]:
-                        export_transcript_and_summary = st.checkbox(
-                            "Export transcription + summary",
-                            value=bool(summary_result),
-                            disabled=not bool(summary_result),
-                            key=f"tx_plus_summary_export_{tid}",
-                        )
+                        st.text_area("Transcript", value=result["text"], height=300)
+                        if summary_requested:
+                            st.markdown("### Summary")
+                            if summary_result:
+                                st.caption(f"Generated with {summary_result['model_used']} (low reasoning mode).")
+                                st.text_area("Summary", value=summary_result["summary"], height=260)
+                            else:
+                                st.warning(f"Summary could not be generated: {summary_error}")
 
-                    include_summary_in_exports = export_transcript_and_summary and bool(summary_result)
-                    if not export_transcript_only and not export_transcript_and_summary:
-                        st.warning("Select at least one export mode.")
+                        st.markdown("Download options:")
+                        col_export_checks = st.columns(2)
+                        with col_export_checks[0]:
+                            export_transcript_only = st.checkbox(
+                                "Export transcription only",
+                                value=True,
+                                key=f"tx_only_export_{tid}",
+                            )
+                        with col_export_checks[1]:
+                            export_transcript_and_summary = st.checkbox(
+                                "Export transcription + summary",
+                                value=bool(summary_result),
+                                disabled=not bool(summary_result),
+                                key=f"tx_plus_summary_export_{tid}",
+                            )
 
-                    dc1, dc2, dc3 = st.columns(3)
-                    with dc1:
-                        st.download_button(
-                            "TXT",
-                            export_as_txt(
-                                result["text"],
-                                title=uploaded_file.name,
-                                summary_text=summary_text_value or "",
-                                include_summary=include_summary_in_exports,
-                            ),
-                            file_name=f"{uploaded_file.name}.txt",
-                            mime="text/plain",
-                            use_container_width=True,
-                            disabled=not (export_transcript_only or export_transcript_and_summary),
-                        )
-                    with dc2:
-                        result_for_export = dict(result)
-                        if summary_result:
-                            result_for_export["summary"] = summary_result["summary"]
-                            result_for_export["summary_model"] = summary_result["model_used"]
+                        include_summary_in_exports = export_transcript_and_summary and bool(summary_result)
+                        if not export_transcript_only and not export_transcript_and_summary:
+                            st.warning("Select at least one export mode.")
 
-                        st.download_button(
-                            "JSON",
-                            export_as_json(
-                                result_for_export,
-                                include_summary=include_summary_in_exports,
-                            ),
-                            file_name=f"{uploaded_file.name}.json",
-                            mime="application/json",
-                            use_container_width=True,
-                            disabled=not (export_transcript_only or export_transcript_and_summary),
-                        )
-                    with dc3:
-                        if st.button("Full Export Options", use_container_width=True):
-                            st.session_state["current_project"] = selected_project
-                            st.switch_page("pages/history.py")
+                        dc1, dc2, dc3 = st.columns(3)
+                        with dc1:
+                            st.download_button(
+                                "TXT",
+                                export_as_txt(
+                                    result["text"],
+                                    title=uploaded_file.name,
+                                    summary_text=summary_text_value or "",
+                                    include_summary=include_summary_in_exports,
+                                ),
+                                file_name=f"{uploaded_file.name}.txt",
+                                mime="text/plain",
+                                use_container_width=True,
+                                disabled=not (export_transcript_only or export_transcript_and_summary),
+                            )
+                        with dc2:
+                            result_for_export = dict(result)
+                            if summary_result:
+                                result_for_export["summary"] = summary_result["summary"]
+                                result_for_export["summary_model"] = summary_result["model_used"]
 
-            except Exception as exc:
-                if "tid" in locals():
-                    update_transcription(tid, transcript="", status="error")
-                progress_bar.empty()
-                st.error(f"Transcription failed: {exc}")
-                if not isinstance(exc, TranscriptionUserError):
-                    st.exception(exc)
+                            st.download_button(
+                                "JSON",
+                                export_as_json(
+                                    result_for_export,
+                                    include_summary=include_summary_in_exports,
+                                ),
+                                file_name=f"{uploaded_file.name}.json",
+                                mime="application/json",
+                                use_container_width=True,
+                                disabled=not (export_transcript_only or export_transcript_and_summary),
+                            )
+                        with dc3:
+                            if st.button("Full Export Options", use_container_width=True):
+                                st.session_state["current_project"] = selected_project
+                                st.switch_page("pages/history.py")
+
+                except Exception as exc:
+                    if "tid" in locals():
+                        update_transcription(tid, transcript="", status="error")
+                    progress_bar.empty()
+                    st.error(f"Transcription failed: {exc}")
+                    if not isinstance(exc, TranscriptionUserError):
+                        st.exception(exc)
