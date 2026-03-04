@@ -7,6 +7,7 @@ import os
 import time
 import tempfile
 import importlib.util
+import re
 from typing import Callable, Optional, List
 from audio.processor import split_audio_into_chunks, get_audio_duration, cleanup_temp_files
 
@@ -49,39 +50,70 @@ MODELS = {
     },
 }
 
-SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4.1-nano")
+SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-5-nano")
+
+SUMMARY_ROLE_INSTRUCTIONS = (
+    "You are an expert Information Architect and Transcription Analyst. "
+    "Your goal is to transform raw transcripts into high-utility, structured, and easy-to-read summaries."
+)
+
+SUMMARY_TASK_INSTRUCTIONS = """Analyze the provided transcript and generate a comprehensive, well-structured summary. Review the text for key themes, main topics discussed, and significant points.
+
+Your output MUST include:
+1. **Metadata:** A brief overview of the transcript (e.g., general topic, identifiable speakers).
+2. **Executive Summary:** A concise 2-3 sentence overview of the core purpose and main takeaways.
+3. **Key Points & Highlights:** A bulleted breakdown of the most important information, decisions, or insights discussed.
+4. **Conclusion / Next Steps:** Any final thoughts, conclusions, or action items mentioned in the transcript."""
+
+SUMMARY_OUTPUT_CONSTRAINTS = """- The output language MUST be exactly: {transcript_language}
+- Make the summary accurate and concrete, avoiding fluff or generic statements."""
+
+SUMMARY_METADATA_CONTEXT_TEMPLATE = "Language from transcription metadata: {transcript_language}"
+
+SUMMARY_SYSTEM_PROMPT_TEMPLATE = """{role_instructions}
+
+Output format rules:
+- Return valid Markdown only.
+- The response language MUST be exactly: {transcript_language}
+- Start directly with the first section header, with no preface or follow-up comments."""
+
+SUMMARY_USER_PROMPT_TEMPLATE = """Generate the final structured summary using these instructions:
+
+<summary_instructions>
+{summary_instructions}
+</summary_instructions>
+
+<transcript_metadata>
+{metadata_context}
+</transcript_metadata>
+
+<transcription>
+{transcription_text}
+</transcription>"""
+
+SUMMARY_SECTION_START_MARKERS = (
+    "metadatos",
+    "metadata",
+    "resumen ejecutivo",
+    "north star summary",
+    'the "north star" summary',
+    "executive summary",
+)
+
 DEFAULT_SUMMARY_PROMPT = """# Role
-You are an expert Information Architect and Transcription Analyst. Your goal is to transform raw transcripts into high-utility, structured summaries.
+{role_instructions}
 
 # Task
-Analyze the provided transcript and follow this three-step execution plan:
-
-## Step 1: Classification & Framework Selection
-First, identify the nature of the transcript (e.g., Business Meeting, Qualitative Interview, Academic Lecture, Podcast, Legal Deposition, or Workshop). Based on this classification, select the most appropriate summary framework.
-
-## Step 2: Analysis
-Review the text for key themes, speaker intent, significant decisions, and recurring patterns.
-
-## Step 3: Structured Output
-Generate the summary using the selected framework. Regardless of the type, your output MUST include:
-1. **Metadata:** (Type of transcript, estimated duration, and list of speakers).
-2. **The "North Star" Summary:** A 2-sentence executive summary of the core purpose.
-3. **Structured Breakdown:** Use headings specific to the transcript type:
-   - *For Meetings:* Decisions Made, Action Items (with owners), and Blockers.
-   - *For Interviews:* Key Insights, Direct Quotes, and Participant Sentiment.
-   - *For Lectures/Podcasts:* Main Thesis, Key Concepts, and Further Reading/Action.
-4. **The "A-Ha" Moment:** One non-obvious insight or important subtext found in the transcript.
+{task_instructions}
 
 # Output Constraints
-- The output language MUST be exactly: [TRANSCRIPT_LANGUAGE]
-- Make the summary highly detailed in every section of the selected framework.
-- Use precise, concrete points rather than generic statements.
+{output_constraints}
 
 # Context (Transcript Metadata)
-Language from transcription metadata: [TRANSCRIPT_LANGUAGE]
+{metadata_context}
 
 # Context (Transcript Data)
-[PASTE YOUR TRANSCRIPT HERE]
+{transcription_text}
 """
 
 
@@ -156,26 +188,40 @@ def check_model_requirements(model: str, api_key: str = None) -> tuple[bool, Opt
 # Individual model transcription functions
 # ---------------------------------------------------------------------------
 
-def transcribe_with_whisper(audio_path: str, api_key: str, language: str = None) -> dict:
+def transcribe_with_whisper(audio_path: str, api_key: str, language: str = None, prompt: str = None) -> dict:
     """Transcribe using OpenAI's Whisper API."""
     try:
-        from openai import OpenAI
+        from openai import OpenAI, OpenAIError
     except ImportError:
         raise ImportError("openai package not installed. Run: pip install openai")
 
     client = OpenAI(api_key=api_key)
 
-    with open(audio_path, "rb") as f:
-        kwargs = {"model": "whisper-1", "file": f, "response_format": "verbose_json"}
-        if language:
-            kwargs["language"] = language
-        response = client.audio.transcriptions.create(**kwargs)
+    try:
+        with open(audio_path, "rb") as f:
+            kwargs = {
+                "model": "whisper-1", 
+                "file": f, 
+                "response_format": "verbose_json",
+                "timestamp_granularities": ["segment", "word"]
+            }
+            if language:
+                kwargs["language"] = language
+            
+            if prompt:
+                # Whisper prompts are limited to ~224 tokens. Using the last ~1000 chars is a safe estimate.
+                kwargs["prompt"] = prompt[-1000:]
 
-    return {
-        "text": response.text,
-        "language": getattr(response, "language", "unknown"),
-        "segments": getattr(response, "segments", []),
-    }
+            response = client.audio.transcriptions.create(**kwargs)
+
+        return {
+            "text": response.text,
+            "language": getattr(response, "language", "unknown"),
+            "segments": getattr(response, "segments", []),
+            "words": getattr(response, "words", []),
+        }
+    except OpenAIError as e:
+        raise TranscriptionUserError(f"OpenAI API Error: {str(e)}")
 
 
 def transcribe_with_elevenlabs(audio_path: str, api_key: str, language: str = None) -> dict:
@@ -293,6 +339,151 @@ def _extract_openai_text(response) -> str:
     return ""
 
 
+def _strip_summary_code_fence(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned.startswith("```"):
+        return cleaned
+
+    lines = cleaned.splitlines()
+    if len(lines) >= 3 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return cleaned
+
+
+def _normalize_summary_heading(line: str) -> str:
+    normalized = (line or "").strip().lower()
+    normalized = re.sub(r"^[#>\-\*\s`_]+", "", normalized)
+    normalized = re.sub(r"[*`_:\-]+$", "", normalized)
+    normalized = normalized.strip()
+    return normalized
+
+
+def _trim_reasoning_preface(summary_text: str) -> str:
+    lines = (summary_text or "").splitlines()
+    if not lines:
+        return ""
+
+    start_index = None
+    for idx, line in enumerate(lines):
+        normalized = _normalize_summary_heading(line)
+        if any(normalized.startswith(marker) for marker in SUMMARY_SECTION_START_MARKERS):
+            start_index = idx
+            break
+
+    if start_index is not None and start_index > 0:
+        return "\n".join(lines[start_index:]).strip()
+    return "\n".join(lines).strip()
+
+
+def _trim_trailing_follow_up(summary_text: str) -> str:
+    lines = (summary_text or "").splitlines()
+
+    def is_follow_up_line(value: str) -> bool:
+        normalized = value.strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"---", "***", "___"}:
+            return True
+        if "?" in normalized or normalized.startswith("¿"):
+            return True
+        follow_up_starts = (
+            "would you like",
+            "do you want",
+            "let me know",
+            "if you want",
+            "si quieres",
+            "si deseas",
+            "puedo ayudarte",
+            "avísame",
+            "hay alguna instrucción adicional",
+            "alguna instrucción adicional",
+        )
+        return normalized.startswith(follow_up_starts)
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    while lines and is_follow_up_line(lines[-1]):
+        lines.pop()
+        while lines and not lines[-1].strip():
+            lines.pop()
+
+    return "\n".join(lines).strip()
+
+
+def _sanitize_summary_output(summary_text: str) -> str:
+    cleaned = _strip_summary_code_fence(summary_text)
+    cleaned = _trim_reasoning_preface(cleaned)
+    cleaned = _trim_trailing_follow_up(cleaned)
+    return cleaned.strip()
+
+
+class _SafePromptVarMap(dict):
+    """Leave unknown template variables untouched instead of raising KeyError."""
+
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _sanitize_transcription_text(transcription_text: str) -> str:
+    sanitized = (transcription_text or "").strip().replace('"""', "'''")
+    sanitized = sanitized.replace("<transcription>", "").replace("</transcription>", "")
+    return sanitized.replace("<transcripcion>", "").replace("</transcripcion>", "")
+
+
+def _build_summary_prompt_payload(
+    summary_instructions_template: str,
+    *,
+    transcript_language: str,
+    transcription_text: str,
+    role_instructions: str = SUMMARY_ROLE_INSTRUCTIONS,
+    task_instructions: str = SUMMARY_TASK_INSTRUCTIONS,
+    output_constraints_template: str = SUMMARY_OUTPUT_CONSTRAINTS,
+    metadata_context_template: str = SUMMARY_METADATA_CONTEXT_TEMPLATE,
+    system_prompt_template: str = SUMMARY_SYSTEM_PROMPT_TEMPLATE,
+    user_prompt_template: str = SUMMARY_USER_PROMPT_TEMPLATE,
+) -> dict:
+    language_value = (transcript_language or "unknown").strip() or "unknown"
+    base_variables = _SafePromptVarMap(
+        {
+            "transcript_language": language_value,
+            "role_instructions": role_instructions,
+            "task_instructions": task_instructions,
+            "output_constraints": output_constraints_template.format(
+                transcript_language=language_value
+            ),
+            "metadata_context": metadata_context_template.format(
+                transcript_language=language_value
+            ),
+            "transcription_text": _sanitize_transcription_text(transcription_text),
+        }
+    )
+
+    template = summary_instructions_template or DEFAULT_SUMMARY_PROMPT
+    summary_instructions = template.format_map(base_variables)
+    summary_instructions = summary_instructions.replace(
+        "[TRANSCRIPT_LANGUAGE]", base_variables["transcript_language"]
+    )
+    summary_instructions = summary_instructions.replace(
+        "[PASTE YOUR TRANSCRIPT HERE]", base_variables["transcription_text"]
+    )
+
+    prompt_variables = _SafePromptVarMap(
+        {
+            **base_variables,
+            "summary_instructions": summary_instructions,
+        }
+    )
+    system_prompt = system_prompt_template.format_map(prompt_variables)
+    user_prompt = user_prompt_template.format_map(prompt_variables)
+    return {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "transcript_language": language_value,
+        "transcription_text": prompt_variables["transcription_text"],
+    }
+
+
 def summarize_transcript_with_openai(
     transcript: str,
     api_key: str,
@@ -311,37 +502,42 @@ def summarize_transcript_with_openai(
         raise ImportError("openai package not installed. Run: pip install openai") from exc
 
     client = OpenAI(api_key=api_key)
-    prompt = prompt_template
-    prompt = prompt.replace("[TRANSCRIPT_LANGUAGE]", (transcript_language or "unknown").strip())
-    prompt = prompt.replace("[PASTE YOUR TRANSCRIPT HERE]", transcript.strip())
+    prompt_payload = _build_summary_prompt_payload(
+        prompt_template,
+        transcript_language=transcript_language,
+        transcription_text=transcript,
+    )
+    
+    system_prompt = prompt_payload["system_prompt"]
+    user_prompt = prompt_payload["user_prompt"]
 
-    response = None
-    if hasattr(client, "responses"):
-        try:
-            response = client.responses.create(
-                model=model,
-                reasoning={"effort": "low"},
-                input=prompt,
-            )
-        except Exception:
-            response = client.responses.create(
-                model=model,
-                input=prompt,
-            )
-    else:
-        try:
+    # For reasoning models (o1, o3-mini, gpt-5-nano), OpenAI recommends using the 'developer' 
+    # role instead of 'system'. They also do not support the 'temperature' parameter.
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "developer", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            reasoning_effort="low",
+        )
+    except Exception as e:
+        # Fallback if the model doesn't support 'developer' role or 'reasoning_effort'
+        # and requires standard chat completion parameters
+        if "developer" in str(e).lower() or "reasoning_effort" in str(e).lower():
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
-                reasoning_effort="low",
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
-        except Exception:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-            )
+        else:
+            raise e
 
-    summary_text = _extract_openai_text(response)
+    summary_text = _sanitize_summary_output(_extract_openai_text(response))
     if not summary_text:
         raise RuntimeError("OpenAI returned an empty summary.")
 
@@ -383,6 +579,7 @@ def transcribe(
     all_texts = []
     total_chunks = len(chunks)
     detected_language = language or "unknown"
+    accumulated_context = ""
 
     try:
         for i, chunk_path in enumerate(chunks):
@@ -393,7 +590,12 @@ def transcribe(
 
             try:
                 if model == "whisper":
-                    result = transcribe_with_whisper(chunk_path, api_key, language)
+                    result = transcribe_with_whisper(
+                        chunk_path, 
+                        api_key, 
+                        language, 
+                        prompt=accumulated_context
+                    )
                 elif model == "elevenlabs_scribe_v2":
                     result = transcribe_with_elevenlabs(chunk_path, api_key, language)
                 elif model == "parakeet":
@@ -407,8 +609,13 @@ def transcribe(
                     raise TranscriptionUserError(f"Transcription failed for {chunk_label}: {e}") from e
                 raise RuntimeError(f"Transcription failed for {chunk_label}: {e}") from e
 
-            all_texts.append(result.get("text", ""))
+            chunk_text = result.get("text", "")
+            all_texts.append(chunk_text)
             detected_language = result.get("language", detected_language)
+            
+            if chunk_text:
+                accumulated_context += " " + chunk_text
+
     finally:
         if is_chunked:
             for c in chunks:
