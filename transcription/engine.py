@@ -50,48 +50,32 @@ MODELS = {
     },
 }
 
-SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4.1-nano")
+SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-5-nano")
+
 SUMMARY_ROLE_INSTRUCTIONS = (
     "You are an expert Information Architect and Transcription Analyst. "
-    "Your goal is to transform raw transcripts into high-utility, structured summaries."
+    "Your goal is to transform raw transcripts into high-utility, structured, and easy-to-read summaries."
 )
 
-SUMMARY_TASK_INSTRUCTIONS = """Analyze the provided transcript and follow this three-step execution plan internally (do not output these steps):
+SUMMARY_TASK_INSTRUCTIONS = """Analyze the provided transcript and generate a comprehensive, well-structured summary. Review the text for key themes, main topics discussed, and significant points.
 
-## Step 1: Classification & Framework Selection
-First, identify the nature of the transcript (e.g., Business Meeting, Qualitative Interview, Academic Lecture, Podcast, Legal Deposition, or Workshop). Based on this classification, select the most appropriate summary framework.
-
-## Step 2: Analysis
-Review the text for key themes, speaker intent, significant decisions, and recurring patterns.
-
-## Step 3: Structured Output
-Generate the summary using the selected framework. Regardless of the type, your output MUST include:
-1. **Metadata:** (Type of transcript, estimated duration, and list of speakers).
-2. **The "North Star" Summary:** A 2-sentence executive summary of the core purpose.
-3. **Structured Breakdown:** Use headings specific to the transcript type:
-   - *For Meetings:* Decisions Made, Action Items (with owners), and Blockers.
-   - *For Interviews:* Key Insights, Direct Quotes, and Participant Sentiment.
-   - *For Lectures/Podcasts:* Main Thesis, Key Concepts, and Further Reading/Action.
-4. **The "A-Ha" Moment:** One non-obvious insight or important subtext found in the transcript."""
+Your output MUST include:
+1. **Metadata:** A brief overview of the transcript (e.g., general topic, identifiable speakers).
+2. **Executive Summary:** A concise 2-3 sentence overview of the core purpose and main takeaways.
+3. **Key Points & Highlights:** A bulleted breakdown of the most important information, decisions, or insights discussed.
+4. **Conclusion / Next Steps:** Any final thoughts, conclusions, or action items mentioned in the transcript."""
 
 SUMMARY_OUTPUT_CONSTRAINTS = """- The output language MUST be exactly: {transcript_language}
-- Make the summary highly detailed in every section of the selected framework.
-- Use precise, concrete points rather than generic statements."""
+- Make the summary accurate and concrete, avoiding fluff or generic statements."""
 
 SUMMARY_METADATA_CONTEXT_TEMPLATE = "Language from transcription metadata: {transcript_language}"
-SUMMARY_SYSTEM_PROMPT_TEMPLATE = """{role_instructions}
 
-You must think internally and return only the final answer.
-Do not reveal reasoning steps, chain-of-thought, scratch work, or process notes.
-Do not output labels like "Step 1", "Step 2", "analysis", or "internal reasoning".
-Do not add follow-up comments, suggestions, or questions.
-End immediately after the last summary section.
+SUMMARY_SYSTEM_PROMPT_TEMPLATE = """{role_instructions}
 
 Output format rules:
 - Return valid Markdown only.
 - The response language MUST be exactly: {transcript_language}
-- The summary must be highly detailed for the selected framework.
-- Start directly with the first section header, with no preface."""
+- Start directly with the first section header, with no preface or follow-up comments."""
 
 SUMMARY_USER_PROMPT_TEMPLATE = """Generate the final structured summary using these instructions:
 
@@ -113,6 +97,7 @@ SUMMARY_SECTION_START_MARKERS = (
     "resumen ejecutivo",
     "north star summary",
     'the "north star" summary',
+    "executive summary",
 )
 
 DEFAULT_SUMMARY_PROMPT = """# Role
@@ -203,26 +188,40 @@ def check_model_requirements(model: str, api_key: str = None) -> tuple[bool, Opt
 # Individual model transcription functions
 # ---------------------------------------------------------------------------
 
-def transcribe_with_whisper(audio_path: str, api_key: str, language: str = None) -> dict:
+def transcribe_with_whisper(audio_path: str, api_key: str, language: str = None, prompt: str = None) -> dict:
     """Transcribe using OpenAI's Whisper API."""
     try:
-        from openai import OpenAI
+        from openai import OpenAI, OpenAIError
     except ImportError:
         raise ImportError("openai package not installed. Run: pip install openai")
 
     client = OpenAI(api_key=api_key)
 
-    with open(audio_path, "rb") as f:
-        kwargs = {"model": "whisper-1", "file": f, "response_format": "verbose_json"}
-        if language:
-            kwargs["language"] = language
-        response = client.audio.transcriptions.create(**kwargs)
+    try:
+        with open(audio_path, "rb") as f:
+            kwargs = {
+                "model": "whisper-1", 
+                "file": f, 
+                "response_format": "verbose_json",
+                "timestamp_granularities": ["segment", "word"]
+            }
+            if language:
+                kwargs["language"] = language
+            
+            if prompt:
+                # Whisper prompts are limited to ~224 tokens. Using the last ~1000 chars is a safe estimate.
+                kwargs["prompt"] = prompt[-1000:]
 
-    return {
-        "text": response.text,
-        "language": getattr(response, "language", "unknown"),
-        "segments": getattr(response, "segments", []),
-    }
+            response = client.audio.transcriptions.create(**kwargs)
+
+        return {
+            "text": response.text,
+            "language": getattr(response, "language", "unknown"),
+            "segments": getattr(response, "segments", []),
+            "words": getattr(response, "words", []),
+        }
+    except OpenAIError as e:
+        raise TranscriptionUserError(f"OpenAI API Error: {str(e)}")
 
 
 def transcribe_with_elevenlabs(audio_path: str, api_key: str, language: str = None) -> dict:
@@ -508,40 +507,25 @@ def summarize_transcript_with_openai(
         transcript_language=transcript_language,
         transcription_text=transcript,
     )
+    
     system_prompt = prompt_payload["system_prompt"]
     user_prompt = prompt_payload["user_prompt"]
 
-    response = None
-    if hasattr(client, "responses"):
-        try:
-            response = client.responses.create(
-                model=model,
-                reasoning={"effort": "low"},
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-        except Exception:
-            response = client.responses.create(
-                model=model,
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-    else:
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                temperature=0.2,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                reasoning_effort="low",
-            )
-        except Exception:
+    # For reasoning models (o1, o3-mini, gpt-5-nano), OpenAI recommends using the 'developer' 
+    # role instead of 'system'. They also do not support the 'temperature' parameter.
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "developer", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            reasoning_effort="low",
+        )
+    except Exception as e:
+        # Fallback if the model doesn't support 'developer' role or 'reasoning_effort'
+        # and requires standard chat completion parameters
+        if "developer" in str(e).lower() or "reasoning_effort" in str(e).lower():
             response = client.chat.completions.create(
                 model=model,
                 temperature=0.2,
@@ -550,6 +534,8 @@ def summarize_transcript_with_openai(
                     {"role": "user", "content": user_prompt},
                 ],
             )
+        else:
+            raise e
 
     summary_text = _sanitize_summary_output(_extract_openai_text(response))
     if not summary_text:
@@ -593,6 +579,7 @@ def transcribe(
     all_texts = []
     total_chunks = len(chunks)
     detected_language = language or "unknown"
+    accumulated_context = ""
 
     try:
         for i, chunk_path in enumerate(chunks):
@@ -603,7 +590,12 @@ def transcribe(
 
             try:
                 if model == "whisper":
-                    result = transcribe_with_whisper(chunk_path, api_key, language)
+                    result = transcribe_with_whisper(
+                        chunk_path, 
+                        api_key, 
+                        language, 
+                        prompt=accumulated_context
+                    )
                 elif model == "elevenlabs_scribe_v2":
                     result = transcribe_with_elevenlabs(chunk_path, api_key, language)
                 elif model == "parakeet":
@@ -617,8 +609,13 @@ def transcribe(
                     raise TranscriptionUserError(f"Transcription failed for {chunk_label}: {e}") from e
                 raise RuntimeError(f"Transcription failed for {chunk_label}: {e}") from e
 
-            all_texts.append(result.get("text", ""))
+            chunk_text = result.get("text", "")
+            all_texts.append(chunk_text)
             detected_language = result.get("language", detected_language)
+            
+            if chunk_text:
+                accumulated_context += " " + chunk_text
+
     finally:
         if is_chunked:
             for c in chunks:
