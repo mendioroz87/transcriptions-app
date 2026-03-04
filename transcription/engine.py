@@ -7,6 +7,7 @@ import os
 import time
 import tempfile
 import importlib.util
+import re
 from typing import Callable, Optional, List
 from audio.processor import split_audio_into_chunks, get_audio_duration, cleanup_temp_files
 
@@ -83,6 +84,8 @@ SUMMARY_SYSTEM_PROMPT_TEMPLATE = """{role_instructions}
 You must think internally and return only the final answer.
 Do not reveal reasoning steps, chain-of-thought, scratch work, or process notes.
 Do not output labels like "Step 1", "Step 2", "analysis", or "internal reasoning".
+Do not add follow-up comments, suggestions, or questions.
+End immediately after the last summary section.
 
 Output format rules:
 - Return valid Markdown only.
@@ -103,6 +106,14 @@ SUMMARY_USER_PROMPT_TEMPLATE = """Generate the final structured summary using th
 <transcription>
 {transcription_text}
 </transcription>"""
+
+SUMMARY_SECTION_START_MARKERS = (
+    "metadatos",
+    "metadata",
+    "resumen ejecutivo",
+    "north star summary",
+    'the "north star" summary',
+)
 
 DEFAULT_SUMMARY_PROMPT = """# Role
 {role_instructions}
@@ -329,6 +340,85 @@ def _extract_openai_text(response) -> str:
     return ""
 
 
+def _strip_summary_code_fence(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned.startswith("```"):
+        return cleaned
+
+    lines = cleaned.splitlines()
+    if len(lines) >= 3 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return cleaned
+
+
+def _normalize_summary_heading(line: str) -> str:
+    normalized = (line or "").strip().lower()
+    normalized = re.sub(r"^[#>\-\*\s`_]+", "", normalized)
+    normalized = re.sub(r"[*`_:\-]+$", "", normalized)
+    normalized = normalized.strip()
+    return normalized
+
+
+def _trim_reasoning_preface(summary_text: str) -> str:
+    lines = (summary_text or "").splitlines()
+    if not lines:
+        return ""
+
+    start_index = None
+    for idx, line in enumerate(lines):
+        normalized = _normalize_summary_heading(line)
+        if any(normalized.startswith(marker) for marker in SUMMARY_SECTION_START_MARKERS):
+            start_index = idx
+            break
+
+    if start_index is not None and start_index > 0:
+        return "\n".join(lines[start_index:]).strip()
+    return "\n".join(lines).strip()
+
+
+def _trim_trailing_follow_up(summary_text: str) -> str:
+    lines = (summary_text or "").splitlines()
+
+    def is_follow_up_line(value: str) -> bool:
+        normalized = value.strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"---", "***", "___"}:
+            return True
+        if "?" in normalized or normalized.startswith("¿"):
+            return True
+        follow_up_starts = (
+            "would you like",
+            "do you want",
+            "let me know",
+            "if you want",
+            "si quieres",
+            "si deseas",
+            "puedo ayudarte",
+            "avísame",
+            "hay alguna instrucción adicional",
+            "alguna instrucción adicional",
+        )
+        return normalized.startswith(follow_up_starts)
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    while lines and is_follow_up_line(lines[-1]):
+        lines.pop()
+        while lines and not lines[-1].strip():
+            lines.pop()
+
+    return "\n".join(lines).strip()
+
+
+def _sanitize_summary_output(summary_text: str) -> str:
+    cleaned = _strip_summary_code_fence(summary_text)
+    cleaned = _trim_reasoning_preface(cleaned)
+    cleaned = _trim_trailing_follow_up(cleaned)
+    return cleaned.strip()
+
+
 class _SafePromptVarMap(dict):
     """Leave unknown template variables untouched instead of raising KeyError."""
 
@@ -461,7 +551,7 @@ def summarize_transcript_with_openai(
                 ],
             )
 
-    summary_text = _extract_openai_text(response)
+    summary_text = _sanitize_summary_output(_extract_openai_text(response))
     if not summary_text:
         raise RuntimeError("OpenAI returned an empty summary.")
 
