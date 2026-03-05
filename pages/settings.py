@@ -31,6 +31,7 @@ from database.db import (
 from transcription.engine import MODELS
 from utils.auth_ui import get_active_team_id, get_current_user, require_login, set_active_team_id
 from utils.components import sidebar_navigation
+from utils.email_sender import send_team_invitation_email
 
 st.set_page_config(page_title="Settings - MLabs", page_icon="S", layout="wide")
 require_login()
@@ -281,9 +282,32 @@ with tab_team:
                     days_valid=int(invite_days),
                 )
                 if ok and invite_payload:
-                    st.success(msg)
-                    st.code(invite_payload["invite_token"], language="text")
-                    st.caption("Share this token privately with the invited user.")
+                    inviter_name = user.get("username") or user.get("email") or "Team Admin"
+                    email_ok, email_msg = send_team_invitation_email(
+                        invitee_email=invite_email.strip(),
+                        team_name=team_name,
+                        inviter_name=inviter_name,
+                        invite_token=invite_payload["invite_token"],
+                        expires_at=invite_payload["expires_at"],
+                    )
+
+                    if email_ok:
+                        st.success(msg)
+                        st.toast("Invitation email sent", icon="✅")
+                        st.caption(email_msg)
+                        st.code(invite_payload["invite_token"], language="text")
+                        st.caption("Backup token shown above. It was also sent by email.")
+                    else:
+                        revoke_ok, revoke_msg = revoke_team_invitation(invite_payload["id"], user["id"])
+                        st.toast("Email failed. Invite revoked. Please retry.", icon="⚠️")
+                        st.error(f"Email delivery failed: {email_msg}")
+                        if revoke_ok:
+                            st.warning("The created invite was revoked automatically.")
+                        else:
+                            st.warning(
+                                "Email failed, and the automatic revoke also failed: "
+                                f"{revoke_msg}. Revoke manually from pending invites."
+                            )
                 else:
                     st.error(msg)
 

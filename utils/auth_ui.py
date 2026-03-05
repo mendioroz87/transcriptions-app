@@ -105,8 +105,16 @@ def render_login_form():
 
     with tab2:
         st.caption("New accounts can only be created from a valid invite token.")
+        invite_token_from_query = str(st.query_params.get("invite", "") or "").strip()
+        previous_prefill = st.session_state.get("accept_invite_prefilled_from_query", "")
+        existing_input = st.session_state.get("accept_invite_token", "")
+        if invite_token_from_query and invite_token_from_query != previous_prefill:
+            if not existing_input or existing_input == previous_prefill:
+                st.session_state["accept_invite_token"] = invite_token_from_query
+            st.session_state["accept_invite_prefilled_from_query"] = invite_token_from_query
+
         with st.form("accept_invite_form"):
-            token = st.text_input("Invite Token")
+            token = st.text_input("Invite Token", key="accept_invite_token")
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
             username = st.text_input("Username (required only if this email has no account)")
@@ -129,6 +137,12 @@ def render_login_form():
                         st.session_state["user"] = payload["user"]
                         set_active_team_id(payload["team_id"])
                         st.session_state.pop("current_project", None)
+                        st.session_state.pop("accept_invite_prefilled_from_query", None)
+                        try:
+                            if "invite" in st.query_params:
+                                del st.query_params["invite"]
+                        except Exception:
+                            pass
 
                         team = get_user_team(payload["user"]["id"], payload["team_id"])
                         team_name = team["team_name"] if team else "team"

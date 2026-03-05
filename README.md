@@ -186,6 +186,19 @@ From the History page, each transcription can be exported as:
 > ffmpeg
 > ```
 
+### Invite Email Secrets (Gmail SMTP)
+
+To enable automated invitation emails from the Team Settings page, add these secrets in Streamlit Cloud:
+
+```toml
+GMAIL_USER = "mendioroz87@gmail.com"
+GMAIL_APP_PASSWORD = "your-gmail-app-password"
+```
+
+For local development, create `.streamlit/secrets.toml` with the same keys.
+Use a Gmail App Password (not your normal Gmail login password).
+If an app password is ever shared, rotate it immediately in your Google Account security settings.
+
 ---
 
 ## 🔒 Security Notes
