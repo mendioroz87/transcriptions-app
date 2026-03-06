@@ -15,6 +15,7 @@ from utils.auth_ui import (
     get_current_user,
     hide_sidebar_for_logged_out,
     is_logged_in,
+    render_pending_invitations_panel,
     render_login_form,
 )
 from utils.components import sidebar_navigation, render_duration_badge, render_status_badge
@@ -113,12 +114,16 @@ if not is_logged_in():
 
 else:
     sidebar_navigation()
+    pending_invite_count = render_pending_invitations_panel()
     # ── Dashboard ────────────────────────────────────────────────────────────
     user = get_current_user()
     active_team_id = get_active_team_id()
     active_team = get_user_team(user["id"], active_team_id) if active_team_id else None
     if not active_team:
-        st.error("No active team is available for this account.")
+        if pending_invite_count:
+            st.info("Accept one of your pending invitations above to activate a team workspace.")
+        else:
+            st.error("No active team is available for this account.")
         st.stop()
 
     active_team_name = active_team.get("team_name") or active_team.get("name") or "Team"

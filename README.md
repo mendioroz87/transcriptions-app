@@ -186,24 +186,36 @@ From the History page, each transcription can be exported as:
 > ffmpeg
 > ```
 
-### Invite Email Secrets (Gmail SMTP)
+### Auth and Email Secrets
 
-To enable automated invitation emails from the Team Settings page, add these secrets in Streamlit Cloud:
+To enable Google sign-in plus Gmail-based invitation/reset emails, add these secrets in Streamlit Cloud:
 
 ```toml
-GMAIL_USER = "mendioroz87@gmail.com"
+APP_BASE_URL = "https://your-app.streamlit.app"
+GMAIL_USER = "your-account@gmail.com"
 GMAIL_APP_PASSWORD = "your-gmail-app-password"
+
+[auth]
+redirect_uri = "https://your-app.streamlit.app/oauth2callback"
+cookie_secret = "replace-with-a-long-random-secret"
+
+[auth.google]
+client_id = "your-google-oauth-client-id"
+client_secret = "your-google-oauth-client-secret"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 ```
 
-For local development, create `.streamlit/secrets.toml` with the same keys.
+For local development, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and fill in the real values.
 Use a Gmail App Password (not your normal Gmail login password).
-If an app password is ever shared, rotate it immediately in your Google Account security settings.
+Google sign-in is restricted to `@gmail.com` accounts in this app.
+If an app password or OAuth secret is ever shared, rotate it immediately.
 
 ---
 
 ## 🔒 Security Notes
 
 - Passwords are hashed with SHA-256 before storage
+- Google sign-in is validated against Gmail-only OIDC claims before a local session is created
 - API keys are stored locally in SQLite (never sent to third parties except the chosen transcription API)
 - For production, consider using environment variables or Streamlit secrets for sensitive config
 
