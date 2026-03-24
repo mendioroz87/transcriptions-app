@@ -2,7 +2,6 @@
 Settings page for API keys, team management, account settings, and system checks.
 """
 
-import hashlib
 import os
 import sys
 
@@ -16,21 +15,26 @@ from database.db import (
     PERMISSION_LEVELS,
     create_team,
     create_team_invitation,
-    get_connection,
     get_team_api_keys,
     get_team_invitations,
     get_team_members,
     get_user_api_keys,
+    get_user_by_id,
+    get_user_identities,
     get_user_team,
+    has_local_password,
     remove_team_member,
     revoke_team_invitation,
     save_api_key,
     save_team_api_key,
+    set_user_password,
     update_team_member_permissions,
+    verify_user_password,
 )
 from transcription.engine import MODELS
 from utils.auth_ui import get_active_team_id, get_current_user, require_login, set_active_team_id
 from utils.components import sidebar_navigation
+from utils.email_sender import send_team_invitation_email
 
 st.set_page_config(page_title="Settings - MLabs", page_icon="S", layout="wide")
 require_login()
@@ -50,6 +54,9 @@ can_manage_members = bool(active_team.get("is_owner") or active_team.get("can_ma
 
 user_api_keys = get_user_api_keys(user["id"])
 team_api_keys = get_team_api_keys(active_team_id, acting_user_id=user["id"])
+user_identities = get_user_identities(user["id"])
+google_identity = next((identity for identity in user_identities if identity.get("provider") == "google"), None)
+user_has_local_password = has_local_password(user)
 
 st.title("Settings")
 st.caption(f"Active team: {team_name}. Manage API keys, team access, and account preferences.")
@@ -262,6 +269,7 @@ with tab_team:
     if not can_manage_members:
         st.info("Your role in this team cannot send or revoke invites.")
     else:
+        st.caption("New invitations are restricted to Gmail addresses and are accepted after Google sign-in.")
         with st.form("invite_user_form"):
             invite_email = st.text_input("Invite Email")
             invite_permission = st.selectbox(
@@ -281,9 +289,32 @@ with tab_team:
                     days_valid=int(invite_days),
                 )
                 if ok and invite_payload:
-                    st.success(msg)
-                    st.code(invite_payload["invite_token"], language="text")
-                    st.caption("Share this token privately with the invited user.")
+                    inviter_name = user.get("username") or user.get("email") or "Team Admin"
+                    email_ok, email_msg = send_team_invitation_email(
+                        invitee_email=invite_email.strip(),
+                        team_name=team_name,
+                        inviter_name=inviter_name,
+                        invite_token=invite_payload["invite_token"],
+                        expires_at=invite_payload["expires_at"],
+                    )
+
+                    if email_ok:
+                        st.success(msg)
+                        st.toast("Invitation email sent", icon="✅")
+                        st.caption(email_msg)
+                        st.code(invite_payload["invite_token"], language="text")
+                        st.caption("Support token shown above. The main acceptance flow now happens after Gmail sign-in.")
+                    else:
+                        revoke_ok, revoke_msg = revoke_team_invitation(invite_payload["id"], user["id"])
+                        st.toast("Email failed. Invite revoked. Please retry.", icon="⚠️")
+                        st.error(f"Email delivery failed: {email_msg}")
+                        if revoke_ok:
+                            st.warning("The created invite was revoked automatically.")
+                        else:
+                            st.warning(
+                                "Email failed, and the automatic revoke also failed: "
+                                f"{revoke_msg}. Revoke manually from pending invites."
+                            )
                 else:
                     st.error(msg)
 
@@ -326,36 +357,30 @@ with tab_account:
             st.markdown(f"**Username:** {user['username']}")
             st.markdown(f"**Email:** {user['email']}")
             st.markdown(f"**Member since:** {user.get('created_at', '')[:10]}")
+        with col2:
+            st.markdown(f"**Local password:** {'Configured' if user_has_local_password else 'Not set'}")
+            st.markdown(f"**Google sign-in:** {'Linked' if google_identity else 'Not linked'}")
+            if google_identity:
+                st.caption(f"Linked Gmail: {google_identity.get('provider_email') or user['email']}")
 
     st.markdown("")
-    st.subheader("Change Password")
+    st.subheader("Change Password" if user_has_local_password else "Set Local Password")
     with st.form("change_password"):
-        old_pw = st.text_input("Current Password", type="password")
+        old_pw = st.text_input("Current Password", type="password") if user_has_local_password else ""
         new_pw = st.text_input("New Password", type="password")
         confirm_pw = st.text_input("Confirm New Password", type="password")
         if st.form_submit_button("Update Password", use_container_width=True):
-            conn = get_connection()
-            user_row = conn.execute(
-                "SELECT * FROM users WHERE id=? AND password_hash=?",
-                (user["id"], hashlib.sha256(old_pw.encode()).hexdigest()),
-            ).fetchone()
-            conn.close()
-
-            if not user_row:
+            if user_has_local_password and not verify_user_password(user["id"], old_pw):
                 st.error("Current password is incorrect.")
             elif new_pw != confirm_pw:
                 st.error("Passwords do not match.")
             elif len(new_pw) < 6:
                 st.error("Password must be at least 6 characters.")
             else:
-                conn = get_connection()
-                conn.execute(
-                    "UPDATE users SET password_hash=? WHERE id=?",
-                    (hashlib.sha256(new_pw.encode()).hexdigest(), user["id"]),
-                )
-                conn.commit()
-                conn.close()
+                set_user_password(user["id"], new_pw)
+                st.session_state["user"] = get_user_by_id(user["id"])
                 st.success("Password updated successfully.")
+                st.rerun()
 
 with tab_system:
     st.subheader("System Status")
@@ -398,5 +423,5 @@ with tab_system:
 
     st.markdown("---")
     st.markdown(f"**Database:** `{os.path.abspath(DB_PATH)}`")
-    st.markdown("**App Version:** 1.1.0")
+    st.markdown("**App Version:** 1.2.0")
     st.markdown("**By:** M Labs")

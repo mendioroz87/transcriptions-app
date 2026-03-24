@@ -13,6 +13,9 @@ BOOTSTRAP_OWNER_PASSWORD_HASH = os.getenv(
     "5d1c242929b20af70542f3e0e457fe5d8031a4620ac09a2c93eeea28f1c17b1e",
 ).strip().lower()
 BOOTSTRAP_OWNER_PASSWORD = os.getenv("BOOTSTRAP_OWNER_PASSWORD", "").strip()
+GOOGLE_PROVIDER = "google"
+GOOGLE_ONLY_PASSWORD_SENTINEL = "!google-only!"
+PASSWORD_RESET_TTL_MINUTES = max(5, int(os.getenv("PASSWORD_RESET_TTL_MINUTES", "60")))
 
 PERMISSION_LEVELS = {
     "use_only": {
@@ -47,6 +50,22 @@ def _to_bool(value) -> bool:
 def _table_columns(conn, table_name: str) -> set[str]:
     rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     return {row["name"] for row in rows}
+
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+def _is_pending_invitation_row(invitation_row) -> bool:
+    if not invitation_row:
+        return False
+
+    expires_at = datetime.fromisoformat(invitation_row["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return (
+        not invitation_row["accepted_at"]
+        and not invitation_row["revoked_at"]
+        and datetime.now(timezone.utc) <= expires_at
+    )
 
 def _permission_flags(permission_level: str) -> tuple[int, int]:
     preset = PERMISSION_LEVELS.get(permission_level, PERMISSION_LEVELS["own_key"])
@@ -141,6 +160,39 @@ def _migrate_team_data(conn):
 def _migrate_transcription_data(conn):
     if "summary_text" not in _table_columns(conn, "transcriptions"):
         conn.execute("ALTER TABLE transcriptions ADD COLUMN summary_text TEXT")
+
+def _migrate_user_identity_data(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_identities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            provider_subject TEXT NOT NULL,
+            provider_email TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(provider, provider_subject),
+            UNIQUE(user_id, provider),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+def _migrate_password_reset_data(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            email TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """
+    )
 
 def _get_bootstrap_password_hash() -> str:
     if BOOTSTRAP_OWNER_PASSWORD:
@@ -307,12 +359,16 @@ def init_db():
 
     _migrate_team_data(conn)
     _migrate_transcription_data(conn)
+    _migrate_user_identity_data(conn)
+    _migrate_password_reset_data(conn)
     _ensure_bootstrap_owner(conn)
     cursor.executescript("""
         CREATE INDEX IF NOT EXISTS idx_projects_team_id ON projects(team_id);
         CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members(user_id);
         CREATE INDEX IF NOT EXISTS idx_transcriptions_project_id ON transcriptions(project_id);
         CREATE INDEX IF NOT EXISTS idx_team_invitations_team_id ON team_invitations(team_id);
+        CREATE INDEX IF NOT EXISTS idx_user_identities_user_id ON user_identities(user_id);
+        CREATE INDEX IF NOT EXISTS idx_password_reset_user_id ON password_reset_tokens(user_id);
     """)
     conn.commit()
     conn.close()
@@ -320,25 +376,45 @@ def init_db():
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
+def has_local_password(user_or_row) -> bool:
+    if not user_or_row:
+        return False
+    if hasattr(user_or_row, "keys") and "password_hash" in user_or_row.keys():
+        password_hash = user_or_row["password_hash"]
+    elif hasattr(user_or_row, "get"):
+        password_hash = user_or_row.get("password_hash")
+    else:
+        password_hash = str(user_or_row or "")
+    return bool(password_hash) and password_hash != GOOGLE_ONLY_PASSWORD_SENTINEL
+
 # --- USER OPERATIONS ---
 
 def create_user(username: str, email: str, password: str):
     return False, "Account creation is invite-only. Ask a team owner for an invite."
 
-def _create_user_internal(conn, username: str, email: str, password: str):
+def _create_user_internal(
+    conn,
+    username: str,
+    email: str,
+    password: str | None = None,
+    *,
+    password_hash: str | None = None,
+):
     username = (username or "").strip()
-    email = (email or "").strip().lower()
+    email = _normalize_email(email)
     if not username:
         return False, "Username is required.", None
     if not email:
         return False, "Email is required.", None
-    if len(password or "") < 6:
+    if password_hash is None and len(password or "") < 6:
         return False, "Password must be at least 6 characters.", None
+
+    final_password_hash = password_hash or hash_password(password or "")
 
     try:
         user_id = conn.execute(
             "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
-            (username, email, hash_password(password)),
+            (username, email, final_password_hash),
         ).lastrowid
     except sqlite3.IntegrityError as exc:
         err = str(exc).lower()
@@ -354,32 +430,38 @@ def _create_user_internal(conn, username: str, email: str, password: str):
 
 def authenticate_user(username_or_email: str, password: str):
     conn = get_connection()
-    user = conn.execute(
-        "SELECT * FROM users WHERE (username=? OR lower(email)=lower(?)) AND password_hash=?",
-        (username_or_email, username_or_email, hash_password(password))
-    ).fetchone()
-    conn.close()
-    return dict(user) if user else None
-
-def reset_user_password(username_or_email: str, email: str, new_password: str):
-    conn = get_connection()
     try:
         user = conn.execute(
-            """SELECT id FROM users
-               WHERE (username=? OR email=?)
-               AND lower(email)=lower(?)""",
-            (username_or_email, username_or_email, email)
-        ).fetchone()
+            "SELECT * FROM users WHERE username=? OR lower(email)=lower(?)",
+            (username_or_email, username_or_email),
+        )
+        user = user.fetchone()
+        if not user or not has_local_password(user):
+            return None
+        if user["password_hash"] != hash_password(password):
+            return None
+        return dict(user)
+    finally:
+        conn.close()
 
-        if not user:
-            return False, "No account matches those details."
+def verify_user_password(user_id: int, password: str) -> bool:
+    conn = get_connection()
+    try:
+        user = conn.execute("SELECT password_hash FROM users WHERE id=?", (user_id,)).fetchone()
+        if not user or not has_local_password(user):
+            return False
+        return user["password_hash"] == hash_password(password)
+    finally:
+        conn.close()
 
+def set_user_password(user_id: int, new_password: str):
+    conn = get_connection()
+    try:
         conn.execute(
             "UPDATE users SET password_hash=? WHERE id=?",
-            (hash_password(new_password), user["id"])
+            (hash_password(new_password), user_id),
         )
         conn.commit()
-        return True, "Password reset successful. Please sign in with your new password."
     finally:
         conn.close()
 
@@ -391,9 +473,246 @@ def get_user_by_id(user_id: int):
 
 def get_user_by_email(email: str):
     conn = get_connection()
-    user = conn.execute("SELECT * FROM users WHERE lower(email)=lower(?)", (email,)).fetchone()
+    user = conn.execute("SELECT * FROM users WHERE lower(email)=lower(?)", (_normalize_email(email),)).fetchone()
     conn.close()
     return dict(user) if user else None
+
+def get_user_identities(user_id: int):
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT provider, provider_subject, provider_email, created_at
+            FROM user_identities
+            WHERE user_id=?
+            ORDER BY provider ASC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def _get_pending_invitation_rows_for_email(conn, email: str):
+    return conn.execute(
+        """
+        SELECT
+            i.*,
+            t.name AS team_name,
+            u.username AS invited_by_username
+        FROM team_invitations i
+        JOIN teams t ON t.id = i.team_id
+        JOIN users u ON u.id = i.invited_by_user_id
+        WHERE lower(i.email)=lower(?)
+          AND i.accepted_at IS NULL
+          AND i.revoked_at IS NULL
+        ORDER BY i.created_at DESC
+        """,
+        (_normalize_email(email),),
+    ).fetchall()
+
+def _link_user_identity(conn, user_id: int, provider: str, provider_subject: str, provider_email: str):
+    normalized_email = _normalize_email(provider_email)
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM user_identities
+        WHERE (provider=? AND provider_subject=?)
+           OR (user_id=? AND provider=?)
+        """,
+        (provider, provider_subject, user_id, provider),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE user_identities
+            SET user_id=?, provider_subject=?, provider_email=?
+            WHERE id=?
+            """,
+            (user_id, provider_subject, normalized_email, existing["id"]),
+        )
+        return
+
+    conn.execute(
+        """
+        INSERT INTO user_identities (user_id, provider, provider_subject, provider_email)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, provider, provider_subject, normalized_email),
+    )
+
+def resolve_google_user_login(provider_subject: str, email: str, preferred_username: str | None = None):
+    normalized_email = _normalize_email(email)
+    subject = (provider_subject or "").strip()
+    if not subject:
+        return False, "Google subject claim is missing.", None
+    if not normalized_email:
+        return False, "Google email claim is missing.", None
+
+    conn = get_connection()
+    try:
+        identity_user = conn.execute(
+            """
+            SELECT u.*
+            FROM user_identities ui
+            JOIN users u ON u.id = ui.user_id
+            WHERE ui.provider=? AND ui.provider_subject=?
+            """,
+            (GOOGLE_PROVIDER, subject),
+        ).fetchone()
+        if identity_user:
+            _link_user_identity(conn, identity_user["id"], GOOGLE_PROVIDER, subject, normalized_email)
+            conn.commit()
+            return True, "Signed in with Google.", dict(identity_user)
+
+        existing_user = conn.execute(
+            "SELECT * FROM users WHERE lower(email)=lower(?)",
+            (normalized_email,),
+        ).fetchone()
+        if existing_user:
+            _link_user_identity(conn, existing_user["id"], GOOGLE_PROVIDER, subject, normalized_email)
+            conn.commit()
+            return True, "Google login linked to your existing account.", dict(existing_user)
+
+        pending_invites = [
+            row for row in _get_pending_invitation_rows_for_email(conn, normalized_email) if _is_pending_invitation_row(row)
+        ]
+        if not pending_invites:
+            return False, "This Gmail address does not have a pending invitation.", None
+
+        base_username = (preferred_username or normalized_email.split("@")[0]).strip() or "member"
+        username = _next_available_username(conn, base_username)
+        ok, msg, user = _create_user_internal(
+            conn=conn,
+            username=username,
+            email=normalized_email,
+            password_hash=GOOGLE_ONLY_PASSWORD_SENTINEL,
+        )
+        if not ok or not user:
+            return False, msg, None
+
+        _link_user_identity(conn, user["id"], GOOGLE_PROVIDER, subject, normalized_email)
+        conn.commit()
+        return True, "Google account created from your invitation.", user
+    finally:
+        conn.close()
+
+def create_password_reset_request(identifier: str):
+    lookup_value = (identifier or "").strip()
+    if not lookup_value:
+        return False, "Username or email is required.", None
+
+    conn = get_connection()
+    try:
+        user = conn.execute(
+            "SELECT * FROM users WHERE username=? OR lower(email)=lower(?)",
+            (lookup_value, lookup_value),
+        ).fetchone()
+        if not user:
+            return True, "If an account matches that identifier, a reset email will be sent.", None
+
+        conn.execute(
+            "UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL",
+            (_utc_now_iso(), user["id"]),
+        )
+
+        token = secrets.token_urlsafe(32)
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES)
+        ).replace(microsecond=0).isoformat()
+        reset_id = conn.execute(
+            """
+            INSERT INTO password_reset_tokens (user_id, email, token, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user["id"], _normalize_email(user["email"]), token, expires_at),
+        ).lastrowid
+        conn.commit()
+
+        payload = conn.execute(
+            """
+            SELECT prt.id, prt.user_id, prt.email, prt.token, prt.expires_at, prt.created_at, u.username
+            FROM password_reset_tokens prt
+            JOIN users u ON u.id = prt.user_id
+            WHERE prt.id=?
+            """,
+            (reset_id,),
+        ).fetchone()
+        return True, "Password reset token created.", dict(payload) if payload else None
+    finally:
+        conn.close()
+
+def revoke_password_reset_token(token: str):
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE password_reset_tokens SET used_at=? WHERE token=? AND used_at IS NULL",
+            (_utc_now_iso(), (token or "").strip()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_password_reset_token(token: str):
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                prt.*,
+                u.username,
+                u.email AS user_email
+            FROM password_reset_tokens prt
+            JOIN users u ON u.id = prt.user_id
+            WHERE prt.token=?
+            """,
+            ((token or "").strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+def validate_password_reset_token(token: str):
+    reset_row = get_password_reset_token(token)
+    if not _is_reset_token_active(reset_row):
+        return False, "This reset link is invalid or has expired.", None
+    return True, "Reset link is valid.", reset_row
+
+def _is_reset_token_active(reset_row) -> bool:
+    if not reset_row or reset_row.get("used_at"):
+        return False
+    expires_at = datetime.fromisoformat(reset_row["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) <= expires_at
+
+def complete_password_reset(token: str, new_password: str):
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT prt.id, prt.user_id, prt.token, prt.expires_at, prt.used_at
+            FROM password_reset_tokens prt
+            WHERE prt.token=?
+            """,
+            ((token or "").strip(),),
+        ).fetchone()
+        reset_payload = dict(row) if row else None
+        if not _is_reset_token_active(reset_payload):
+            return False, "This reset link is invalid or has expired."
+
+        conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (hash_password(new_password), reset_payload["user_id"]),
+        )
+        conn.execute(
+            "UPDATE password_reset_tokens SET used_at=? WHERE id=?",
+            (_utc_now_iso(), reset_payload["id"]),
+        )
+        conn.commit()
+        return True, "Password updated. You can now sign in."
+    finally:
+        conn.close()
 
 # --- TEAM / INVITATION OPERATIONS ---
 
@@ -554,9 +873,11 @@ def create_team_invitation(
     permission_level: str = "own_key",
     days_valid: int = 7,
 ):
-    normalized_email = (email or "").strip().lower()
+    normalized_email = _normalize_email(email)
     if not normalized_email:
         return False, "Email is required.", None
+    if not normalized_email.endswith("@gmail.com"):
+        return False, "Only Gmail addresses can be invited with this flow.", None
 
     conn = get_connection()
     try:
@@ -664,6 +985,26 @@ def get_team_invitations(team_id: int, acting_user_id: int):
     finally:
         conn.close()
 
+def get_pending_invitations_for_email(email: str):
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        return []
+
+    conn = get_connection()
+    try:
+        invites = []
+        for row in _get_pending_invitation_rows_for_email(conn, normalized_email):
+            if not _is_pending_invitation_row(row):
+                continue
+            invite = dict(row)
+            invite["can_edit_personal_api_keys"] = _to_bool(invite.get("can_edit_personal_api_keys"))
+            invite["can_edit_team_api_keys"] = _to_bool(invite.get("can_edit_team_api_keys"))
+            invite["permission_level"] = _permission_level_for(invite)
+            invites.append(invite)
+        return invites
+    finally:
+        conn.close()
+
 def revoke_team_invitation(invitation_id: int, acting_user_id: int):
     conn = get_connection()
     try:
@@ -709,7 +1050,7 @@ def accept_team_invitation(invite_token: str, email: str, password: str, usernam
         if not invitation:
             return False, "Invalid or inactive invite token.", None
 
-        normalized_email = (email or "").strip().lower()
+        normalized_email = _normalize_email(email)
         if normalized_email != (invitation["email"] or "").strip().lower():
             return False, "Invite email does not match.", None
 
@@ -725,6 +1066,8 @@ def accept_team_invitation(invite_token: str, email: str, password: str, usernam
         ).fetchone()
 
         if user_row:
+            if not has_local_password(user_row):
+                return False, "This account uses Google sign-in. Use Google to accept the invitation.", None
             if hash_password(password or "") != user_row["password_hash"]:
                 return False, "Password is incorrect for this existing account.", None
             user_id = user_row["id"]
@@ -762,6 +1105,56 @@ def accept_team_invitation(invite_token: str, email: str, password: str, usernam
         return True, "Invitation accepted. You can now use the app.", {
             "user": dict(user_row),
             "team_id": invitation["team_id"],
+        }
+    finally:
+        conn.close()
+
+def accept_pending_team_invitation(invitation_id: int, user_id: int):
+    conn = get_connection()
+    try:
+        invitation = conn.execute(
+            """
+            SELECT
+                i.*,
+                t.name AS team_name
+            FROM team_invitations i
+            JOIN teams t ON t.id = i.team_id
+            WHERE i.id=?
+            """,
+            (invitation_id,),
+        ).fetchone()
+        if not invitation or not _is_pending_invitation_row(invitation):
+            return False, "Invitation is no longer active.", None
+
+        user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not user:
+            return False, "User account not found.", None
+
+        if _normalize_email(user["email"]) != _normalize_email(invitation["email"]):
+            return False, "This invitation belongs to a different email address.", None
+
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO team_members (
+                team_id, user_id, can_edit_personal_api_keys, can_edit_team_api_keys, can_manage_members
+            ) VALUES (?, ?, ?, ?, 0)
+            """,
+            (
+                invitation["team_id"],
+                user_id,
+                int(invitation["can_edit_personal_api_keys"]),
+                int(invitation["can_edit_team_api_keys"]),
+            ),
+        )
+        conn.execute(
+            "UPDATE team_invitations SET accepted_at=? WHERE id=?",
+            (_utc_now_iso(), invitation_id),
+        )
+        conn.commit()
+
+        return True, f"Joined {invitation['team_name']}.", {
+            "team_id": invitation["team_id"],
+            "team_name": invitation["team_name"],
         }
     finally:
         conn.close()
