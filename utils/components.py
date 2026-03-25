@@ -1,5 +1,16 @@
-﻿import streamlit as st
+import streamlit as st
+
 from transcription.engine import MODELS
+from utils.ui import is_mobile_view
+
+
+NAV_ITEMS = [
+    ("overview", "app.py", "🏠 Overview"),
+    ("projects", "pages/projects.py", "📁 Projects"),
+    ("transcribe", "pages/transcribe.py", "🎙️ Transcribe"),
+    ("history", "pages/history.py", "📜 History"),
+    ("settings", "pages/settings.py", "⚙️ Settings"),
+]
 
 
 def _safe_page_link(path: str, label: str) -> bool:
@@ -61,18 +72,86 @@ def render_duration_badge(seconds: float) -> str:
 
 
 def render_status_badge(status: str) -> str:
-    default_color = "\u26AA"
+    default_color = "⚪"
     colors = {
-        "completed": "\U0001F7E2",
-        "processing": "\U0001F7E1",
+        "completed": "🟢",
+        "processing": "🟡",
         "pending": default_color,
-        "error": "\U0001F534",
+        "error": "🔴",
     }
     return f"{colors.get(status, default_color)} {status.capitalize()}"
 
 
-def sidebar_navigation():
-    """Render sidebar navigation and logout."""
+def _role_label(active_team: dict) -> str:
+    if active_team.get("is_owner"):
+        return "Owner"
+    if active_team.get("can_edit_team_api_keys"):
+        return "Team Key Manager"
+    if active_team.get("can_edit_personal_api_keys"):
+        return "Personal Key Manager"
+    return "Member"
+
+
+def _render_mobile_navigation(user: dict, teams: list[dict], current: str) -> None:
+    from utils.auth_ui import get_active_team_id, logout, set_active_team_id
+
+    with st.container(border=True):
+        top_left, top_right = st.columns([1.8, 1])
+        with top_left:
+            st.markdown(f"**{user['username']}**")
+            st.caption(user.get("email", ""))
+        with top_right:
+            if st.button("Logout", key="mobile_logout_btn", use_container_width=True):
+                logout()
+
+        if teams:
+            team_ids = [team["id"] for team in teams]
+            team_map = {team["id"]: team for team in teams}
+            active_team_id = get_active_team_id()
+            if active_team_id not in team_map:
+                active_team_id = team_ids[0]
+                set_active_team_id(active_team_id)
+            selected_team_id = st.selectbox(
+                "Active Team",
+                options=team_ids,
+                format_func=lambda tid: team_map[tid].get("team_name") or team_map[tid]["name"],
+                index=team_ids.index(active_team_id),
+                key="mobile_active_team_selector",
+            )
+            active_team = team_map[selected_team_id]
+            st.caption(f"Role: {_role_label(active_team)}")
+            if selected_team_id != active_team_id:
+                set_active_team_id(selected_team_id)
+                st.session_state.pop("current_project", None)
+                st.rerun()
+
+        row1 = st.columns(2)
+        for col, item in zip(row1, NAV_ITEMS[:2]):
+            item_key, item_path, item_label = item
+            with col:
+                if st.button(
+                    item_label,
+                    key=f"mobile_nav_{item_key}",
+                    use_container_width=True,
+                    type="primary" if item_key == current else "secondary",
+                ):
+                    st.switch_page(item_path)
+
+        row2 = st.columns(3)
+        for col, item in zip(row2, NAV_ITEMS[2:]):
+            item_key, item_path, item_label = item
+            with col:
+                if st.button(
+                    item_label,
+                    key=f"mobile_nav_{item_key}",
+                    use_container_width=True,
+                    type="primary" if item_key == current else "secondary",
+                ):
+                    st.switch_page(item_path)
+
+
+def sidebar_navigation(current: str = "overview"):
+    """Render desktop sidebar or mobile top navigation based on the detected device."""
     from database.db import get_user_teams
     from utils.auth_ui import (
         ensure_active_team,
@@ -83,47 +162,42 @@ def sidebar_navigation():
     )
 
     user = get_current_user()
-    if user:
-        ensure_active_team()
-        teams = get_user_teams(user["id"])
+    if not user:
+        return
 
-        st.sidebar.markdown(f"### \U0001F464 {user['username']}")
-        if teams:
-            team_ids = [team["id"] for team in teams]
-            team_map = {team["id"]: team for team in teams}
-            active_team_id = get_active_team_id()
-            if active_team_id not in team_map:
-                active_team_id = team_ids[0]
-                set_active_team_id(active_team_id)
+    ensure_active_team()
+    teams = get_user_teams(user["id"])
+    if is_mobile_view():
+        _render_mobile_navigation(user, teams, current)
+        return
 
-            selected_team_id = st.sidebar.selectbox(
-                "Active Team",
-                options=team_ids,
-                format_func=lambda tid: team_map[tid].get("team_name") or team_map[tid]["name"],
-                index=team_ids.index(active_team_id),
-            )
-            if selected_team_id != active_team_id:
-                set_active_team_id(selected_team_id)
-                st.session_state.pop("current_project", None)
-                st.rerun()
+    st.sidebar.markdown(f"### 👤 {user['username']}")
+    if teams:
+        team_ids = [team["id"] for team in teams]
+        team_map = {team["id"]: team for team in teams}
+        active_team_id = get_active_team_id()
+        if active_team_id not in team_map:
+            active_team_id = team_ids[0]
+            set_active_team_id(active_team_id)
 
-            active_team = team_map[selected_team_id]
-            if active_team.get("is_owner"):
-                role_label = "Owner"
-            elif active_team.get("can_edit_team_api_keys"):
-                role_label = "Team Key Manager"
-            elif active_team.get("can_edit_personal_api_keys"):
-                role_label = "Personal Key Manager"
-            else:
-                role_label = "Member"
-            st.sidebar.caption(f"Role: {role_label}")
+        selected_team_id = st.sidebar.selectbox(
+            "Active Team",
+            options=team_ids,
+            format_func=lambda tid: team_map[tid].get("team_name") or team_map[tid]["name"],
+            index=team_ids.index(active_team_id),
+        )
+        if selected_team_id != active_team_id:
+            set_active_team_id(selected_team_id)
+            st.session_state.pop("current_project", None)
+            st.rerun()
 
-        st.sidebar.markdown("---")
-        _safe_page_link("app.py", label="\U0001F3E0 Dashboard")
-        _safe_page_link("pages/projects.py", label="\U0001F4C1 My Projects")
-        _safe_page_link("pages/transcribe.py", label="\U0001F3A4 Transcribe")
-        _safe_page_link("pages/history.py", label="\U0001F4DC History")
-        _safe_page_link("pages/settings.py", label="\u2699\ufe0f Settings")
-        st.sidebar.markdown("---")
-        if st.sidebar.button("\U0001F6AA Logout", use_container_width=True):
-            logout()
+        active_team = team_map[selected_team_id]
+        st.sidebar.caption(f"Role: {_role_label(active_team)}")
+
+    st.sidebar.markdown("---")
+    for item_key, item_path, item_label in NAV_ITEMS:
+        label = f"➡️ {item_label}" if item_key == current else item_label
+        _safe_page_link(item_path, label=label)
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        logout()

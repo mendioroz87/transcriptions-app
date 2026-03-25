@@ -1,35 +1,363 @@
-﻿"""
+"""
 History Page - View, search, export, and remove transcriptions.
 """
 
+import io
 import os
+import re
 import sys
+import zipfile
 
 import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from database.db import (  # noqa: E402
+from database.db import (
     delete_transcription,
     delete_transcriptions_bulk,
     get_project_transcriptions,
-    get_user_team,
     get_user_projects,
+    get_user_team,
 )
-from exports.exporter import (  # noqa: E402
-    export_as_csv,
-    export_as_docx,
-    export_as_json,
-    export_as_markdown,
-    export_as_txt,
-)
-from utils.auth_ui import get_active_team_id, get_current_user, require_login  # noqa: E402
-from utils.components import render_duration_badge, render_status_badge, sidebar_navigation  # noqa: E402
+from exports.exporter import export_as_docx, export_as_markdown, export_as_txt
+from utils.auth_ui import get_active_team_id, get_current_user, require_login
+from utils.components import render_duration_badge, render_status_badge, sidebar_navigation
+from utils.ui import init_ui, is_mobile_view, render_page_header
 
 
-st.set_page_config(page_title="History - MLabs", page_icon="H", layout="wide")
+st.set_page_config(page_title="History - MLabs", page_icon="📜", layout="wide")
+init_ui()
 require_login()
-sidebar_navigation()
+sidebar_navigation(current="history")
+
+
+def _selection_key(tx_id: int) -> str:
+    return f"history_selected_{tx_id}"
+
+
+def _details_key(tx_id: int) -> str:
+    return f"history_details_open_{tx_id}"
+
+
+def _safe_stem(filename: str, tx_id: int) -> str:
+    stem = os.path.splitext(filename or f"transcription_{tx_id}")[0]
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")
+    return sanitized or f"transcription_{tx_id}"
+
+
+def _meta_for_export(tx: dict) -> dict:
+    return {
+        "model_used": tx.get("model_used", ""),
+        "language": tx.get("language", ""),
+        "duration_seconds": tx.get("duration_seconds", 0),
+        "word_count": tx.get("word_count", 0),
+    }
+
+
+def _build_bulk_export_zip(transcriptions: list[dict], export_format: str, include_summary: bool) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for tx in transcriptions:
+            transcript = tx.get("transcript") or ""
+            summary_text = tx.get("summary_text") or ""
+            stem = f"{_safe_stem(tx.get('original_filename', ''), tx['id'])}_{tx['id']}"
+            meta = _meta_for_export(tx)
+
+            if export_format == "txt":
+                payload = export_as_txt(
+                    transcript,
+                    stem,
+                    summary_text=summary_text,
+                    include_summary=include_summary,
+                )
+                archive.writestr(f"{stem}.txt", payload)
+            elif export_format == "md":
+                payload = export_as_markdown(
+                    transcript,
+                    stem,
+                    meta,
+                    summary_text=summary_text,
+                    include_summary=include_summary,
+                )
+                archive.writestr(f"{stem}.md", payload)
+            elif export_format == "docx":
+                payload = export_as_docx(
+                    transcript,
+                    stem,
+                    meta,
+                    summary_text=summary_text,
+                    include_summary=include_summary,
+                )
+                archive.writestr(f"{stem}.docx", payload)
+            else:
+                raise ValueError(f"Unsupported export format: {export_format}")
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _set_visible_selection(transcriptions: list[dict], selected: bool) -> None:
+    for tx in transcriptions:
+        st.session_state[_selection_key(tx["id"])] = selected
+
+
+def _selected_transcriptions(transcriptions: list[dict]) -> list[dict]:
+    return [tx for tx in transcriptions if st.session_state.get(_selection_key(tx["id"]), False)]
+
+
+def _render_bulk_toolbar(transcriptions: list[dict], user_id: int, mobile: bool) -> None:
+    selected_items = _selected_transcriptions(transcriptions)
+    visible_count = len(transcriptions)
+
+    top_cols = st.columns(2 if mobile else 4)
+    with top_cols[0]:
+        if st.button("Select Visible", use_container_width=True, key="history_select_visible"):
+            _set_visible_selection(transcriptions, True)
+            st.rerun()
+    with top_cols[1]:
+        if st.button("Clear Selection", use_container_width=True, key="history_clear_visible"):
+            _set_visible_selection(transcriptions, False)
+            st.rerun()
+    if not mobile:
+        with top_cols[2]:
+            st.caption(f"Visible: {visible_count}")
+        with top_cols[3]:
+            st.caption(f"Selected: {len(selected_items)}")
+
+    if not selected_items:
+        st.caption("Select one or more transcripts to enable bulk export or bulk delete.")
+        return
+
+    st.markdown(
+        f"<div class='mlabs-toolbar'><strong>{len(selected_items)} selected</strong> · Bulk export now uses TXT, Markdown or DOCX zip bundles.</div>",
+        unsafe_allow_html=True,
+    )
+    include_summary = st.checkbox(
+        "Include summaries in bulk exports",
+        value=any(bool(tx.get("summary_text")) for tx in selected_items),
+        key="history_bulk_include_summary",
+    )
+
+    action_cols = st.columns(2 if mobile else 4)
+    txt_zip = _build_bulk_export_zip(selected_items, "txt", include_summary)
+    md_zip = _build_bulk_export_zip(selected_items, "md", include_summary)
+
+    with action_cols[0]:
+        st.download_button(
+            "Download TXT ZIP",
+            data=txt_zip,
+            file_name="mlabs_history_txt.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+    with action_cols[1]:
+        st.download_button(
+            "Download MD ZIP",
+            data=md_zip,
+            file_name="mlabs_history_markdown.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+    docx_error = None
+    try:
+        docx_zip = _build_bulk_export_zip(selected_items, "docx", include_summary)
+    except ImportError:
+        docx_zip = None
+        docx_error = "DOCX bulk export is unavailable because python-docx is not installed."
+
+    if not mobile:
+        with action_cols[2]:
+            st.download_button(
+                "Download DOCX ZIP",
+                data=docx_zip or b"",
+                file_name="mlabs_history_docx.zip",
+                mime="application/zip",
+                use_container_width=True,
+                disabled=docx_zip is None,
+            )
+        with action_cols[3]:
+            if st.button("Delete Selected", use_container_width=True, type="secondary"):
+                deleted_count = delete_transcriptions_bulk([tx["id"] for tx in selected_items], acting_user_id=user_id)
+                _set_visible_selection(transcriptions, False)
+                st.warning(f"Deleted {deleted_count} transcription(s).")
+                st.rerun()
+    else:
+        extra_cols = st.columns(2)
+        with extra_cols[0]:
+            st.download_button(
+                "Download DOCX ZIP",
+                data=docx_zip or b"",
+                file_name="mlabs_history_docx.zip",
+                mime="application/zip",
+                use_container_width=True,
+                disabled=docx_zip is None,
+            )
+        with extra_cols[1]:
+            if st.button("Delete Selected", use_container_width=True, type="secondary"):
+                deleted_count = delete_transcriptions_bulk([tx["id"] for tx in selected_items], acting_user_id=user_id)
+                _set_visible_selection(transcriptions, False)
+                st.warning(f"Deleted {deleted_count} transcription(s).")
+                st.rerun()
+
+    if docx_error:
+        st.caption(docx_error)
+
+
+def _render_export_panel(tx: dict) -> None:
+    transcript = tx.get("transcript") or ""
+    if not transcript:
+        st.info("No transcript to export.")
+        return
+
+    summary_text = tx.get("summary_text") or ""
+    include_summary = st.checkbox(
+        "Include summary in export",
+        value=bool(summary_text),
+        disabled=not bool(summary_text),
+        key=f"tx_export_include_summary_{tx['id']}",
+    )
+    file_stem = _safe_stem(tx["original_filename"], tx["id"])
+    meta = _meta_for_export(tx)
+
+    export_cols = st.columns(3)
+    with export_cols[0]:
+        st.download_button(
+            "TXT",
+            export_as_txt(
+                transcript,
+                file_stem,
+                summary_text=summary_text,
+                include_summary=include_summary,
+            ),
+            file_name=f"{file_stem}.txt",
+            mime="text/plain",
+            use_container_width=True,
+            key=f"txt_{tx['id']}",
+        )
+    with export_cols[1]:
+        st.download_button(
+            "MD",
+            export_as_markdown(
+                transcript,
+                file_stem,
+                meta,
+                summary_text=summary_text,
+                include_summary=include_summary,
+            ),
+            file_name=f"{file_stem}.md",
+            mime="text/markdown",
+            use_container_width=True,
+            key=f"md_{tx['id']}",
+        )
+    with export_cols[2]:
+        try:
+            docx_bytes = export_as_docx(
+                transcript,
+                file_stem,
+                meta,
+                summary_text=summary_text,
+                include_summary=include_summary,
+            )
+            st.download_button(
+                "DOCX",
+                docx_bytes,
+                file_name=f"{file_stem}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key=f"docx_{tx['id']}",
+            )
+        except ImportError:
+            st.caption("DOCX unavailable (install python-docx).")
+
+
+def _render_details(tx: dict) -> None:
+    transcript = tx.get("transcript") or ""
+    summary_text = tx.get("summary_text") or ""
+
+    with st.container(border=True):
+        detail_tabs = st.tabs(["Transcript", "Export", "Metadata"])
+        with detail_tabs[0]:
+            if transcript:
+                st.text_area(
+                    "Transcript",
+                    value=transcript,
+                    height=250,
+                    key=f"text_{tx['id']}",
+                    label_visibility="collapsed",
+                )
+                if summary_text:
+                    st.markdown("#### Summary")
+                    st.text_area(
+                        "Summary",
+                        value=summary_text,
+                        height=160,
+                        key=f"summary_{tx['id']}",
+                        label_visibility="collapsed",
+                    )
+            else:
+                st.info("No transcript available yet.")
+        with detail_tabs[1]:
+            _render_export_panel(tx)
+        with detail_tabs[2]:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**File:** {tx['original_filename']}")
+                st.markdown(f"**Project:** {tx['project_name']}")
+                st.markdown(f"**Model:** {tx.get('model_used', 'N/A')}")
+                st.markdown(f"**Language:** {tx.get('language', 'N/A')}")
+            with col2:
+                st.markdown(f"**Status:** {tx.get('status', 'N/A')}")
+                st.markdown(f"**Duration:** {render_duration_badge(tx.get('duration_seconds')) or 'N/A'}")
+                st.markdown(f"**Word Count:** {(tx.get('word_count') or 0):,}")
+                st.markdown(f"**Created:** {(tx.get('created_at') or '')[:19]}")
+
+            if st.button("Delete this transcription", key=f"del_{tx['id']}", type="secondary"):
+                delete_transcription(tx["id"], acting_user_id=user["id"])
+                st.warning("Transcription deleted.")
+                st.rerun()
+
+
+def _render_history_rows(transcriptions: list[dict], mobile: bool) -> None:
+    for tx in transcriptions:
+        open_now = st.session_state.get(_details_key(tx["id"]), False)
+        with st.container(border=True):
+            if mobile:
+                top_cols = st.columns([0.5, 3.2, 1.4])
+                with top_cols[0]:
+                    st.checkbox("Select", key=_selection_key(tx["id"]), label_visibility="collapsed")
+                with top_cols[1]:
+                    st.markdown(f"**{tx['original_filename']}**")
+                    st.caption(
+                        f"{tx['project_name']} · {render_duration_badge(tx.get('duration_seconds')) or 'Duration n/a'} · "
+                        f"{(tx.get('word_count') or 0):,} words"
+                    )
+                    st.caption(render_status_badge(tx["status"]))
+                with top_cols[2]:
+                    if st.button("Hide" if open_now else "Open", key=f"toggle_{tx['id']}", use_container_width=True):
+                        st.session_state[_details_key(tx["id"])] = not open_now
+                        st.rerun()
+            else:
+                cols = st.columns([0.5, 3.1, 1.8, 1.4, 1.2, 1.3])
+                with cols[0]:
+                    st.checkbox("Select", key=_selection_key(tx["id"]), label_visibility="collapsed")
+                with cols[1]:
+                    st.markdown(f"**{tx['original_filename']}**")
+                    st.caption(tx["project_name"])
+                with cols[2]:
+                    st.caption(render_status_badge(tx["status"]))
+                    st.caption(tx.get("language") or "Language n/a")
+                with cols[3]:
+                    st.caption(render_duration_badge(tx.get("duration_seconds")) or "Duration n/a")
+                with cols[4]:
+                    st.caption(f"{(tx.get('word_count') or 0):,} words")
+                with cols[5]:
+                    if st.button("Hide" if open_now else "Open", key=f"toggle_{tx['id']}", use_container_width=True):
+                        st.session_state[_details_key(tx["id"])] = not open_now
+                        st.rerun()
+            if st.session_state.get(_details_key(tx["id"]), False):
+                _render_details(tx)
+
 
 user = get_current_user()
 active_team_id = get_active_team_id()
@@ -40,18 +368,19 @@ if not active_team:
 
 team_name = active_team.get("team_name") or active_team.get("name") or "Team"
 projects = get_user_projects(user["id"], team_id=active_team_id)
+mobile = is_mobile_view()
 
-st.title("Transcription History")
-st.caption(f"Team: {team_name}. Browse, search, export, and remove transcriptions.")
-st.markdown("---")
+render_page_header(
+    "Transcription History",
+    f"{team_name} review workspace with visible bulk actions and simplified export formats.",
+)
 
 if not projects:
     st.info("No projects yet.")
     st.stop()
 
-col_f1, col_f2, col_f3 = st.columns(3)
-
-with col_f1:
+filter_cols = st.columns(1 if mobile else 3)
+with filter_cols[0]:
     project_map = {"All Projects": None}
     project_map.update({project["name"]: project["id"] for project in projects})
 
@@ -66,11 +395,12 @@ with col_f1:
         list(project_map.keys()),
         index=list(project_map.keys()).index(default_proj_name),
     )
-
-with col_f2:
+with filter_cols[1 if not mobile else 0]:
     status_filter = st.selectbox("Status", ["All", "completed", "processing", "error"])
-
-with col_f3:
+if not mobile:
+    with filter_cols[2]:
+        search_query = st.text_input("Search transcripts", placeholder="Type to search...")
+else:
     search_query = st.text_input("Search transcripts", placeholder="Type to search...")
 
 all_transcriptions = []
@@ -78,7 +408,6 @@ for project in projects:
     selected_project_id = project_map[selected_proj_name]
     if selected_project_id and project["id"] != selected_project_id:
         continue
-
     for transcription in get_project_transcriptions(project["id"], acting_user_id=user["id"]):
         transcription["project_name"] = project["name"]
         all_transcriptions.append(transcription)
@@ -88,8 +417,8 @@ all_transcriptions.sort(key=lambda tx: tx["created_at"], reverse=True)
 if status_filter != "All":
     all_transcriptions = [tx for tx in all_transcriptions if tx["status"] == status_filter]
 
-if search_query:
-    q = search_query.lower()
+if search_query.strip():
+    q = search_query.lower().strip()
     all_transcriptions = [
         tx
         for tx in all_transcriptions
@@ -97,226 +426,10 @@ if search_query:
         or q in (tx.get("transcript") or "").lower()
     ]
 
-if all_transcriptions:
-    with st.expander(f"Bulk Export ({len(all_transcriptions)} records)"):
-        has_bulk_summary = any(bool(tx.get("summary_text")) for tx in all_transcriptions)
-        bc1, bc2 = st.columns(2)
-        with bc1:
-            bulk_export_transcript_only = st.checkbox(
-                "Export transcription only",
-                value=True,
-                key="bulk_export_transcript_only",
-            )
-        with bc2:
-            bulk_export_with_summary = st.checkbox(
-                "Export transcription + summary",
-                value=has_bulk_summary,
-                disabled=not has_bulk_summary,
-                key="bulk_export_with_summary",
-            )
-        bulk_include_summary = bulk_export_with_summary and has_bulk_summary
-        if not bulk_export_transcript_only and not bulk_export_with_summary:
-            st.warning("Select at least one export mode.")
-
-        st.download_button(
-            "Export all as CSV",
-            data=export_as_csv(all_transcriptions, include_summary=bulk_include_summary),
-            file_name="mlabs_transcriptions.csv",
-            mime="text/csv",
-            use_container_width=True,
-            disabled=not (bulk_export_transcript_only or bulk_export_with_summary),
-        )
-
-    with st.expander(f"Bulk Remove ({len(all_transcriptions)} records)", expanded=False):
-        st.caption("Delete selected transcriptions from the filtered list. This cannot be undone.")
-        tx_label_to_id = {
-            f"{tx['original_filename']} | {tx.get('created_at', '')[:19]} | id={tx['id']}": tx["id"]
-            for tx in all_transcriptions
-        }
-        selected_labels = st.multiselect(
-            "Select transcriptions to delete",
-            options=list(tx_label_to_id.keys()),
-            key="bulk_delete_transcriptions_select",
-        )
-        confirmed = st.checkbox(
-            "I understand these deletions are permanent.",
-            key="bulk_delete_transcriptions_confirm",
-        )
-
-        if st.button(
-            "Delete Selected Transcriptions",
-            type="secondary",
-            use_container_width=True,
-            disabled=not selected_labels or not confirmed,
-            key="bulk_delete_transcriptions_btn",
-        ):
-            selected_ids = [tx_label_to_id[label] for label in selected_labels]
-            deleted_count = delete_transcriptions_bulk(selected_ids, acting_user_id=user["id"])
-            st.warning(f"Deleted {deleted_count} transcription(s).")
-            st.rerun()
-
-st.markdown(f"**{len(all_transcriptions)} transcriptions found**")
-st.markdown("")
+st.caption(f"{len(all_transcriptions)} transcriptions match your filters.")
 
 if not all_transcriptions:
     st.info("No transcriptions match your filters.")
 else:
-    for tx in all_transcriptions:
-        label = (
-            f"{render_status_badge(tx['status'])}  {tx['original_filename']}"
-            f"  |  {tx['project_name']}"
-            f"  |  {render_duration_badge(tx.get('duration_seconds')) or '?'}"
-            f"  |  {(tx.get('word_count') or 0):,} words"
-            f"  |  {tx.get('language') or '?'}"
-        )
-
-        with st.expander(label):
-            tab_text, tab_export, tab_meta = st.tabs(["Transcript", "Export", "Metadata"])
-
-            transcript = tx.get("transcript") or ""
-            summary_text = tx.get("summary_text") or ""
-
-            with tab_text:
-                if transcript:
-                    st.text_area(
-                        "Transcript",
-                        value=transcript,
-                        height=250,
-                        key=f"text_{tx['id']}",
-                        label_visibility="collapsed",
-                    )
-                    if summary_text:
-                        st.markdown("#### Summary")
-                        st.text_area(
-                            "Summary",
-                            value=summary_text,
-                            height=200,
-                            key=f"summary_{tx['id']}",
-                            label_visibility="collapsed",
-                        )
-                else:
-                    st.info("No transcript available yet.")
-
-            with tab_export:
-                if transcript:
-                    ecfg1, ecfg2 = st.columns(2)
-                    with ecfg1:
-                        tx_export_transcript_only = st.checkbox(
-                            "Export transcription only",
-                            value=True,
-                            key=f"tx_export_only_{tx['id']}",
-                        )
-                    with ecfg2:
-                        tx_export_with_summary = st.checkbox(
-                            "Export transcription + summary",
-                            value=bool(summary_text),
-                            disabled=not bool(summary_text),
-                            key=f"tx_export_both_{tx['id']}",
-                        )
-                    include_summary_in_export = tx_export_with_summary and bool(summary_text)
-                    if not tx_export_transcript_only and not tx_export_with_summary:
-                        st.warning("Select at least one export mode.")
-
-                    st.markdown("**Choose export format:**")
-                    ec1, ec2, ec3, ec4, ec5 = st.columns(5)
-
-                    file_stem = os.path.splitext(tx["original_filename"])[0]
-                    meta = {
-                        "model_used": tx.get("model_used", ""),
-                        "language": tx.get("language", ""),
-                        "duration_seconds": tx.get("duration_seconds", 0),
-                        "word_count": tx.get("word_count", 0),
-                    }
-
-                    with ec1:
-                        st.download_button(
-                            "TXT",
-                            export_as_txt(
-                                transcript,
-                                file_stem,
-                                summary_text=summary_text,
-                                include_summary=include_summary_in_export,
-                            ),
-                            file_name=f"{file_stem}.txt",
-                            mime="text/plain",
-                            use_container_width=True,
-                            key=f"txt_{tx['id']}",
-                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
-                        )
-                    with ec2:
-                        st.download_button(
-                            "JSON",
-                            export_as_json(tx, include_summary=include_summary_in_export),
-                            file_name=f"{file_stem}.json",
-                            mime="application/json",
-                            use_container_width=True,
-                            key=f"json_{tx['id']}",
-                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
-                        )
-                    with ec3:
-                        st.download_button(
-                            "MD",
-                            export_as_markdown(
-                                transcript,
-                                file_stem,
-                                meta,
-                                summary_text=summary_text,
-                                include_summary=include_summary_in_export,
-                            ),
-                            file_name=f"{file_stem}.md",
-                            mime="text/markdown",
-                            use_container_width=True,
-                            key=f"md_{tx['id']}",
-                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
-                        )
-                    with ec4:
-                        try:
-                            docx_bytes = export_as_docx(
-                                transcript,
-                                file_stem,
-                                meta,
-                                summary_text=summary_text,
-                                include_summary=include_summary_in_export,
-                            )
-                            st.download_button(
-                                "DOCX",
-                                docx_bytes,
-                                file_name=f"{file_stem}.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                use_container_width=True,
-                                key=f"docx_{tx['id']}",
-                                disabled=not (tx_export_transcript_only or tx_export_with_summary),
-                            )
-                        except ImportError:
-                            st.caption("DOCX unavailable (install python-docx).")
-                    with ec5:
-                        st.download_button(
-                            "CSV",
-                            export_as_csv([tx], include_summary=include_summary_in_export),
-                            file_name=f"{file_stem}.csv",
-                            mime="text/csv",
-                            use_container_width=True,
-                            key=f"csv_{tx['id']}",
-                            disabled=not (tx_export_transcript_only or tx_export_with_summary),
-                        )
-                else:
-                    st.info("No transcript to export.")
-
-            with tab_meta:
-                col_m1, col_m2 = st.columns(2)
-                with col_m1:
-                    st.markdown(f"**File:** {tx['original_filename']}")
-                    st.markdown(f"**Project:** {tx['project_name']}")
-                    st.markdown(f"**Model:** {tx.get('model_used', 'N/A')}")
-                    st.markdown(f"**Language:** {tx.get('language', 'N/A')}")
-                with col_m2:
-                    st.markdown(f"**Status:** {tx.get('status', 'N/A')}")
-                    st.markdown(f"**Duration:** {render_duration_badge(tx.get('duration_seconds'))}")
-                    st.markdown(f"**Word Count:** {(tx.get('word_count') or 0):,}")
-                    st.markdown(f"**Created:** {(tx.get('created_at') or '')[:19]}")
-
-                st.markdown("")
-                if st.button("Delete this transcription", key=f"del_{tx['id']}", type="secondary"):
-                    delete_transcription(tx["id"], acting_user_id=user["id"])
-                    st.warning("Transcription deleted.")
-                    st.rerun()
+    _render_bulk_toolbar(all_transcriptions, user["id"], mobile)
+    _render_history_rows(all_transcriptions, mobile)

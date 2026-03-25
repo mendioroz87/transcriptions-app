@@ -1,27 +1,29 @@
-﻿import os
+import os
 import sys
 
 import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from database.db import (  # noqa: E402
+from database.db import (
     create_project,
     delete_project,
     delete_projects_bulk,
     get_project_transcriptions,
-    get_user_team,
     get_user_projects,
+    get_user_team,
     update_project,
 )
-from transcription.engine import MODELS  # noqa: E402
-from utils.auth_ui import get_active_team_id, get_current_user, require_login  # noqa: E402
-from utils.components import render_duration_badge, render_status_badge, sidebar_navigation  # noqa: E402
+from transcription.engine import MODELS
+from utils.auth_ui import get_active_team_id, get_current_user, require_login
+from utils.components import render_duration_badge, sidebar_navigation
+from utils.ui import init_ui, is_mobile_view, render_page_header
 
 
-st.set_page_config(page_title="Projects - MLabs", page_icon="P", layout="wide")
+st.set_page_config(page_title="Projects - MLabs", page_icon="📁", layout="wide")
+init_ui()
 require_login()
-sidebar_navigation()
+sidebar_navigation(current="projects")
 
 user = get_current_user()
 active_team_id = get_active_team_id()
@@ -36,10 +38,12 @@ can_manage_any_key = bool(
     or active_team.get("can_edit_personal_api_keys")
     or active_team.get("can_edit_team_api_keys")
 )
+mobile = is_mobile_view()
 
-st.title("My Projects")
-st.caption(f"Team: {team_name}. Organize transcriptions and remove projects when no longer needed.")
-st.markdown("---")
+render_page_header(
+    "Projects",
+    f"{team_name} workspace with device-aware project management and simplified cards on mobile.",
+)
 
 with st.expander("Create New Project", expanded=False):
     with st.form("create_project_form"):
@@ -80,105 +84,128 @@ with st.expander("Create New Project", expanded=False):
                 st.success(f"Project '{p_name}' created.")
                 st.rerun()
 
-st.markdown("")
 projects = get_user_projects(user["id"], team_id=active_team_id)
+search_query = st.text_input("Search projects", placeholder="Filter by name or description")
+filtered_projects = projects
+if search_query.strip():
+    q = search_query.lower().strip()
+    filtered_projects = [
+        project
+        for project in projects
+        if q in (project.get("name") or "").lower() or q in (project.get("description") or "").lower()
+    ]
 
-if not projects:
-    st.info("No projects yet. Create your first project above.")
+if not filtered_projects:
+    st.info("No projects match your current filters.")
 else:
-    for project in projects:
+    for project in filtered_projects:
         transcriptions = get_project_transcriptions(project["id"], acting_user_id=user["id"])
         completed = [tx for tx in transcriptions if tx["status"] == "completed"]
         total_words = sum((tx.get("word_count") or 0) for tx in completed)
         total_dur = sum((tx.get("duration_seconds") or 0) for tx in completed)
-
         model_info = MODELS.get(project["model"], {})
-        with st.container(border=True):
-            col_info, col_stats, col_actions = st.columns([3, 2, 1.5])
 
-            with col_info:
-                st.markdown(f"### {model_info.get('icon', 'P')} {project['name']}")
+        with st.container(border=True):
+            if mobile:
+                st.markdown(f"### {model_info.get('icon', '📁')} {project['name']}")
                 if project.get("description"):
                     st.caption(project["description"])
+                meta_cols = st.columns(3)
+                with meta_cols[0]:
+                    st.metric("Transcriptions", len(transcriptions))
+                with meta_cols[1]:
+                    st.metric("Words", f"{total_words:,}")
+                with meta_cols[2]:
+                    st.metric("Audio", render_duration_badge(total_dur) or "-")
                 st.caption(
-                    f"Model: **{model_info.get('label', project['model'])}** | "
-                    f"Created: {project['created_at'][:10]}"
+                    f"Model: {model_info.get('label', project['model'])} · Created: {project['created_at'][:10]}"
                 )
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Transcribe", key=f"mobile_tx_{project['id']}", use_container_width=True, type="primary"):
+                        st.session_state["current_project"] = project
+                        st.switch_page("pages/transcribe.py")
+                with b2:
+                    if st.button("History", key=f"mobile_hist_{project['id']}", use_container_width=True):
+                        st.session_state["current_project"] = project
+                        st.switch_page("pages/history.py")
+            else:
+                col_info, col_stats, col_actions = st.columns([3, 2, 1.5])
+                with col_info:
+                    st.markdown(f"### {model_info.get('icon', '📁')} {project['name']}")
+                    if project.get("description"):
+                        st.caption(project["description"])
+                    st.caption(
+                        f"Model: {model_info.get('label', project['model'])} · Created: {project['created_at'][:10]}"
+                    )
+                with col_stats:
+                    st.metric("Transcriptions", len(transcriptions))
+                    st.metric("Total Words", f"{total_words:,}")
+                    st.metric("Audio Processed", render_duration_badge(total_dur) or "-")
+                with col_actions:
+                    if st.button("Transcribe", key=f"tx_{project['id']}", use_container_width=True, type="primary"):
+                        st.session_state["current_project"] = project
+                        st.switch_page("pages/transcribe.py")
+                    if st.button("History", key=f"hist_{project['id']}", use_container_width=True):
+                        st.session_state["current_project"] = project
+                        st.switch_page("pages/history.py")
 
-            with col_stats:
-                st.metric("Transcriptions", len(transcriptions))
-                st.metric("Total Words", f"{total_words:,}")
-                st.metric("Audio Processed", render_duration_badge(total_dur) or "-")
-
-            with col_actions:
-                if st.button("Transcribe", key=f"tx_{project['id']}", use_container_width=True, type="primary"):
-                    st.session_state["current_project"] = project
-                    st.switch_page("pages/transcribe.py")
-
-                if st.button("History", key=f"hist_{project['id']}", use_container_width=True):
-                    st.session_state["current_project"] = project
-                    st.switch_page("pages/history.py")
-
-                with st.popover("Edit", use_container_width=True):
-                    with st.form(f"edit_{project['id']}"):
-                        new_name = st.text_input("Name", value=project["name"])
-                        new_desc = st.text_area("Description", value=project.get("description") or "")
-                        model_keys = list(MODELS.keys())
-                        new_model = st.selectbox(
-                            "Model",
-                            options=model_keys,
-                            format_func=lambda key: f"{MODELS[key]['icon']} {MODELS[key]['label']}",
-                            index=model_keys.index(project["model"]) if project["model"] in model_keys else 0,
-                        )
-                        if MODELS[new_model]["requires_api_key"]:
-                            if can_manage_any_key:
-                                new_key = st.text_input(
-                                    "API Key",
-                                    type="password",
-                                    value=project.get("api_key") or "",
-                                )
-                            else:
-                                new_key = project.get("api_key") or None
-                                st.caption("Your role cannot edit project API keys.")
+            with st.popover("Edit Project", use_container_width=not mobile):
+                with st.form(f"edit_{project['id']}"):
+                    new_name = st.text_input("Name", value=project["name"])
+                    new_desc = st.text_area("Description", value=project.get("description") or "")
+                    model_keys = list(MODELS.keys())
+                    new_model = st.selectbox(
+                        "Model",
+                        options=model_keys,
+                        format_func=lambda key: f"{MODELS[key]['icon']} {MODELS[key]['label']}",
+                        index=model_keys.index(project["model"]) if project["model"] in model_keys else 0,
+                    )
+                    if MODELS[new_model]["requires_api_key"]:
+                        if can_manage_any_key:
+                            new_key = st.text_input(
+                                "API Key",
+                                type="password",
+                                value=project.get("api_key") or "",
+                            )
                         else:
-                            new_key = None
+                            new_key = project.get("api_key") or None
+                            st.caption("Your role cannot edit project API keys.")
+                    else:
+                        new_key = None
 
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.form_submit_button("Save", use_container_width=True):
-                                update_project(
-                                    project["id"],
-                                    new_name,
-                                    new_desc,
-                                    new_model,
-                                    new_key,
-                                    acting_user_id=user["id"],
-                                )
-                                st.success("Saved.")
-                                st.rerun()
-                        with c2:
-                            if st.form_submit_button("Delete", use_container_width=True):
-                                delete_project(project["id"], acting_user_id=user["id"])
-                                st.warning("Project deleted.")
-                                st.rerun()
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.form_submit_button("Save", use_container_width=True):
+                            update_project(
+                                project["id"],
+                                new_name,
+                                new_desc,
+                                new_model,
+                                new_key,
+                                acting_user_id=user["id"],
+                            )
+                            st.success("Saved.")
+                            st.rerun()
+                    with c2:
+                        if st.form_submit_button("Delete", use_container_width=True):
+                            delete_project(project["id"], acting_user_id=user["id"])
+                            st.warning("Project deleted.")
+                            st.rerun()
 
             if transcriptions:
-                st.markdown("")
+                st.caption("Recent files")
                 for tx in transcriptions[:3]:
-                    st.markdown(
-                        f"{render_status_badge(tx['status'])} "
-                        f"**{tx['original_filename']}** | "
-                        f"{render_duration_badge(tx.get('duration_seconds'))} | "
+                    st.caption(
+                        f"• {tx['original_filename']} · {render_duration_badge(tx.get('duration_seconds')) or 'Duration n/a'} · "
                         f"{(tx.get('word_count') or 0):,} words"
                     )
 
-    st.markdown("")
     with st.expander("Bulk Remove Projects", expanded=False):
-        st.caption("Delete selected projects and all transcriptions inside them. This cannot be undone.")
-
+        st.caption("Delete selected projects and every transcription inside them. This cannot be undone.")
         project_label_to_id = {
             f"{project['name']} (id={project['id']})": project["id"]
-            for project in projects
+            for project in filtered_projects
         }
         selected_labels = st.multiselect(
             "Select projects to delete",
@@ -189,7 +216,6 @@ else:
             "I understand these deletions are permanent.",
             key="bulk_delete_projects_confirm",
         )
-
         if st.button(
             "Delete Selected Projects",
             type="secondary",
