@@ -367,7 +367,7 @@ with tab_team:
     if not can_manage_members:
         st.info("Your role in this team cannot send or revoke invites.")
     else:
-        st.caption("New invitations are restricted to Gmail addresses and are accepted after Google sign-in.")
+        st.caption("New invitations are restricted to Gmail addresses and are applied automatically after Google sign-in.")
         with st.form("invite_user_form"):
             invite_email = st.text_input("Invite Email")
             invite_permission = st.selectbox(
@@ -401,7 +401,7 @@ with tab_team:
                         st.toast("Invitation email sent", icon="✅")
                         st.caption(email_msg)
                         st.code(invite_payload["invite_token"], language="text")
-                        st.caption("Support token shown above. The main acceptance flow now happens after Gmail sign-in.")
+                        st.caption("Support token shown above. The invited Gmail account will be joined to this team at sign-in.")
                     else:
                         revoke_ok, revoke_msg = revoke_team_invitation(invite_payload["id"], user["id"])
                         st.toast("Email failed. Invite revoked. Please retry.", icon="⚠️")

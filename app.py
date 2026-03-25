@@ -1,7 +1,8 @@
 """
-MLabs Transcription — Main Entry Point
+MLabs Transcription - Main Entry Point
 """
 
+from html import escape
 import os
 import sys
 
@@ -38,51 +39,74 @@ init_db()
 init_ui()
 
 
+def _render_feature_stack(features: list[tuple[str, str, str]]) -> None:
+    items_html = "".join(
+        f"""
+        <div class="mlabs-feature-item">
+            <div class="mlabs-feature-icon">{escape(icon)}</div>
+            <div class="mlabs-feature-body">
+                <strong>{escape(title)}</strong>
+                <p>{escape(desc)}</p>
+            </div>
+        </div>
+        """
+        for icon, title, desc in features
+    )
+    st.markdown(
+        f"""
+        <div class="mlabs-section-kicker">Team Workflow</div>
+        <div class="mlabs-feature-stack">{items_html}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_logged_out_hero() -> None:
     hide_sidebar_for_logged_out()
     mobile = is_mobile_view()
 
     render_page_header(
         "MLabs Transcription",
-        "Transcribe any audio, collaborate with your team, and export polished outputs.",
+        "Transcribe long-form audio, manage shared projects, and keep the invited team active from the first sign-in.",
     )
 
     features = [
-        ("🎙️", "Multiple AI Models", "Whisper, ElevenLabs Scribe v2, Parakeet, Faster-Whisper"),
-        ("📁", "Wide Audio Support", "MP3, WAV, OPUS, M4A, FLAC, WebM and more via FFmpeg"),
-        ("⏱️", "Long Audio Sessions", "Process 1–5 hour recordings with automatic chunking"),
-        ("🔑", "Flexible Keys", "Use team keys, personal keys, or one-off project keys"),
-        ("📤", "Export Ready", "TXT, Markdown and DOCX outputs for clean handoff"),
-        ("👥", "Team Workspace", "Shared projects, permissions, invitations and activity history"),
+        ("AI", "Multiple AI models", "Whisper, ElevenLabs Scribe v2, Parakeet, and Faster-Whisper."),
+        ("AV", "Wide audio support", "MP3, WAV, OPUS, M4A, FLAC, WebM, and FFmpeg conversion."),
+        ("LX", "Long recordings", "Chunk and process one to five hour sessions without manual splitting."),
+        ("KEY", "Flexible key sources", "Use shared team keys, personal keys, project keys, or one-off keys."),
+        ("TXT", "Clean exports", "TXT, Markdown, and DOCX outputs ready for handoff."),
+        ("TEAM", "Shared workspace", "Members, invitations, settings, and project history in one place."),
     ]
 
     if mobile:
-        with st.container(border=True):
-            st.markdown("### Welcome")
-            st.caption("Sign in to access your team workspace.")
-            st.link_button("Invite Me", INVITE_ME_LINK, use_container_width=True)
-            render_login_form()
-
-        st.markdown("### Why teams use it")
-        for icon, title, desc in features:
-            with st.container(border=True):
-                st.markdown(f"**{icon} {title}**")
-                st.caption(desc)
+        st.markdown("### Welcome")
+        st.caption("Sign in with the invited Gmail address or use your local account.")
+        st.link_button("Request Invite", INVITE_ME_LINK, use_container_width=True)
+        render_login_form()
+        st.markdown("")
+        _render_feature_stack(features)
         return
 
-    col1, col2 = st.columns([1.3, 1], gap="large")
+    col1, col2 = st.columns([1.2, 0.9], gap="large")
     with col1:
         st.markdown("### Why teams use it")
-        for icon, title, desc in features:
-            with st.container(border=True):
-                st.markdown(f"**{icon} {title}**")
-                st.caption(desc)
+        st.caption("Designed for shared transcription work rather than single-user uploads.")
+        _render_feature_stack(features)
     with col2:
-        with st.container(border=True):
-            st.markdown("### Welcome")
-            st.caption("Sign in to access your team workspace.")
-            st.link_button("Invite Me", INVITE_ME_LINK, use_container_width=True)
-            render_login_form()
+        st.markdown(
+            """
+            <div class="mlabs-auth-panel">
+                <div class="mlabs-section-kicker">Access</div>
+                <h3>Welcome</h3>
+                <p>Sign in with the invited Gmail address or use your local password to enter the workspace.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("")
+        st.link_button("Request Invite", INVITE_ME_LINK, use_container_width=True)
+        render_login_form()
 
 
 def _render_stats(projects: list[dict], user_id: int) -> None:
@@ -116,7 +140,7 @@ def _render_stats(projects: list[dict], user_id: int) -> None:
     if mobile:
         for idx in range(0, len(metric_items), 2):
             cols = st.columns(2)
-            for col, item in zip(cols, metric_items[idx: idx + 2]):
+            for col, item in zip(cols, metric_items[idx : idx + 2]):
                 label, value = item
                 with col:
                     with st.container(border=True):
@@ -133,9 +157,9 @@ def _render_stats(projects: list[dict], user_id: int) -> None:
 
 def _render_quick_actions() -> None:
     actions = [
-        ("🎙️ New Transcription", "pages/transcribe.py", True),
-        ("📁 Manage Projects", "pages/projects.py", False),
-        ("⚙️ Settings", "pages/settings.py", False),
+        ("New Transcription", "pages/transcribe.py", True),
+        ("Manage Projects", "pages/projects.py", False),
+        ("Settings", "pages/settings.py", False),
     ]
     mobile = is_mobile_view()
     if mobile:
@@ -169,8 +193,8 @@ def _render_recent_activity(projects: list[dict], user_id: int) -> None:
     for tx in recent:
         with st.container(border=True):
             st.markdown(
-                f"**{tx['original_filename']}** · {render_status_badge(tx['status'])} · "
-                f"📁 {tx['project_name']} · {render_duration_badge(tx.get('duration_seconds')) or 'Duration n/a'}"
+                f"**{tx['original_filename']}** | {render_status_badge(tx['status'])} | "
+                f"{tx['project_name']} | {render_duration_badge(tx.get('duration_seconds')) or 'Duration n/a'}"
             )
             meta_cols = st.columns(3)
             with meta_cols[0]:
@@ -193,7 +217,7 @@ else:
     active_team = get_user_team(user["id"], active_team_id) if active_team_id else None
     if not active_team:
         if pending_invite_count:
-            st.info("Accept one of your pending invitations above to activate a team workspace.")
+            st.info("Accept one of your remaining invitations above to activate a team workspace.")
         else:
             st.error("No active team is available for this account.")
         st.stop()
@@ -201,7 +225,7 @@ else:
     active_team_name = active_team.get("team_name") or active_team.get("name") or "Team"
     render_page_header(
         f"Welcome, {user['username']}",
-        f"{active_team_name} dashboard with responsive layouts for desktop and mobile.",
+        f"{active_team_name} dashboard with shared stats, recent work, and team-aware navigation.",
     )
 
     projects = get_user_projects(user["id"], team_id=active_team_id)

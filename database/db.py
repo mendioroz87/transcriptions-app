@@ -194,6 +194,10 @@ def _migrate_password_reset_data(conn):
         """
     )
 
+def _migrate_user_preference_data(conn):
+    if "preferred_team_id" not in _table_columns(conn, "users"):
+        conn.execute("ALTER TABLE users ADD COLUMN preferred_team_id INTEGER")
+
 def _get_bootstrap_password_hash() -> str:
     if BOOTSTRAP_OWNER_PASSWORD:
         return hash_password(BOOTSTRAP_OWNER_PASSWORD)
@@ -361,6 +365,7 @@ def init_db():
     _migrate_transcription_data(conn)
     _migrate_user_identity_data(conn)
     _migrate_password_reset_data(conn)
+    _migrate_user_preference_data(conn)
     _ensure_bootstrap_owner(conn)
     cursor.executescript("""
         CREATE INDEX IF NOT EXISTS idx_projects_team_id ON projects(team_id);
@@ -477,6 +482,33 @@ def get_user_by_email(email: str):
     conn.close()
     return dict(user) if user else None
 
+def _set_user_preferred_team_id(conn, user_id: int, team_id: int | None):
+    conn.execute(
+        "UPDATE users SET preferred_team_id=? WHERE id=?",
+        (team_id, user_id),
+    )
+
+def set_user_preferred_team_id(user_id: int, team_id: int | None):
+    conn = get_connection()
+    try:
+        _set_user_preferred_team_id(conn, user_id, team_id)
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_user_preferred_team_id(user_id: int):
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT preferred_team_id FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        if not row or row["preferred_team_id"] is None:
+            return None
+        return int(row["preferred_team_id"])
+    finally:
+        conn.close()
+
 def get_user_identities(user_id: int):
     conn = get_connection()
     try:
@@ -541,6 +573,49 @@ def _link_user_identity(conn, user_id: int, provider: str, provider_subject: str
         (user_id, provider, provider_subject, normalized_email),
     )
 
+def _accept_pending_invitations_for_user(conn, user_id: int, email: str):
+    accepted_invites = []
+    accepted_at = _utc_now_iso()
+    for invitation in _get_pending_invitation_rows_for_email(conn, email):
+        if not _is_pending_invitation_row(invitation):
+            continue
+
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO team_members (
+                team_id, user_id, can_edit_personal_api_keys, can_edit_team_api_keys, can_manage_members
+            ) VALUES (?, ?, ?, ?, 0)
+            """,
+            (
+                invitation["team_id"],
+                user_id,
+                int(invitation["can_edit_personal_api_keys"]),
+                int(invitation["can_edit_team_api_keys"]),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE team_invitations
+            SET accepted_at=?
+            WHERE id=?
+              AND accepted_at IS NULL
+              AND revoked_at IS NULL
+            """,
+            (accepted_at, invitation["id"]),
+        )
+        accepted_invites.append(
+            {
+                "team_id": invitation["team_id"],
+                "team_name": invitation["team_name"],
+                "invitation_id": invitation["id"],
+            }
+        )
+
+    if accepted_invites:
+        _set_user_preferred_team_id(conn, user_id, accepted_invites[0]["team_id"])
+
+    return accepted_invites
+
 def resolve_google_user_login(provider_subject: str, email: str, preferred_username: str | None = None):
     normalized_email = _normalize_email(email)
     subject = (provider_subject or "").strip()
@@ -562,8 +637,13 @@ def resolve_google_user_login(provider_subject: str, email: str, preferred_usern
         ).fetchone()
         if identity_user:
             _link_user_identity(conn, identity_user["id"], GOOGLE_PROVIDER, subject, normalized_email)
+            accepted_invites = _accept_pending_invitations_for_user(conn, identity_user["id"], normalized_email)
             conn.commit()
-            return True, "Signed in with Google.", dict(identity_user)
+            payload = dict(identity_user)
+            if accepted_invites:
+                payload["auto_joined_team_id"] = accepted_invites[0]["team_id"]
+                payload["auto_joined_team_name"] = accepted_invites[0]["team_name"]
+            return True, "Signed in with Google.", payload
 
         existing_user = conn.execute(
             "SELECT * FROM users WHERE lower(email)=lower(?)",
@@ -571,8 +651,13 @@ def resolve_google_user_login(provider_subject: str, email: str, preferred_usern
         ).fetchone()
         if existing_user:
             _link_user_identity(conn, existing_user["id"], GOOGLE_PROVIDER, subject, normalized_email)
+            accepted_invites = _accept_pending_invitations_for_user(conn, existing_user["id"], normalized_email)
             conn.commit()
-            return True, "Google login linked to your existing account.", dict(existing_user)
+            payload = dict(existing_user)
+            if accepted_invites:
+                payload["auto_joined_team_id"] = accepted_invites[0]["team_id"]
+                payload["auto_joined_team_name"] = accepted_invites[0]["team_name"]
+            return True, "Google login linked to your existing account.", payload
 
         pending_invites = [
             row for row in _get_pending_invitation_rows_for_email(conn, normalized_email) if _is_pending_invitation_row(row)
@@ -592,7 +677,11 @@ def resolve_google_user_login(provider_subject: str, email: str, preferred_usern
             return False, msg, None
 
         _link_user_identity(conn, user["id"], GOOGLE_PROVIDER, subject, normalized_email)
+        accepted_invites = _accept_pending_invitations_for_user(conn, user["id"], normalized_email)
         conn.commit()
+        if accepted_invites:
+            user["auto_joined_team_id"] = accepted_invites[0]["team_id"]
+            user["auto_joined_team_name"] = accepted_invites[0]["team_name"]
         return True, "Google account created from your invitation.", user
     finally:
         conn.close()
@@ -750,6 +839,9 @@ def get_user_default_team_id(user_id: int):
     teams = get_user_teams(user_id)
     if not teams:
         return None
+    preferred_team_id = get_user_preferred_team_id(user_id)
+    if preferred_team_id and any(team["id"] == preferred_team_id for team in teams):
+        return preferred_team_id
     personal = next((team for team in teams if team.get("is_personal")), None)
     return (personal or teams[0])["id"]
 
@@ -1100,6 +1192,7 @@ def accept_team_invitation(invite_token: str, email: str, password: str, usernam
             "UPDATE team_invitations SET accepted_at=? WHERE id=?",
             (_utc_now_iso(), invitation["id"]),
         )
+        _set_user_preferred_team_id(conn, user_id, invitation["team_id"])
         conn.commit()
 
         return True, "Invitation accepted. You can now use the app.", {
@@ -1150,6 +1243,7 @@ def accept_pending_team_invitation(invitation_id: int, user_id: int):
             "UPDATE team_invitations SET accepted_at=? WHERE id=?",
             (_utc_now_iso(), invitation_id),
         )
+        _set_user_preferred_team_id(conn, user_id, invitation["team_id"])
         conn.commit()
 
         return True, f"Joined {invitation['team_name']}.", {

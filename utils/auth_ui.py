@@ -12,6 +12,7 @@ from database.db import (
     get_user_default_team_id,
     get_user_teams,
     resolve_google_user_login,
+    set_user_preferred_team_id,
     revoke_password_reset_token,
     validate_password_reset_token,
 )
@@ -200,7 +201,11 @@ def _sync_google_session():
 
     st.session_state["user"] = user
     st.session_state["auth_provider"] = GOOGLE_PROVIDER_NAME
-    ensure_active_team()
+    auto_joined_team_id = user.get("auto_joined_team_id")
+    if auto_joined_team_id:
+        set_active_team_id(auto_joined_team_id, persist=False)
+    else:
+        ensure_active_team()
     return user
 
 
@@ -217,11 +222,16 @@ def get_active_team_id():
     return st.session_state.get("active_team_id")
 
 
-def set_active_team_id(team_id: int | None):
+def set_active_team_id(team_id: int | None, *, persist: bool = True):
     if team_id is None:
         st.session_state.pop("active_team_id", None)
     else:
         st.session_state["active_team_id"] = team_id
+
+    if persist:
+        user = st.session_state.get("user")
+        if user and user.get("id"):
+            set_user_preferred_team_id(user["id"], team_id)
 
 
 def ensure_active_team():
@@ -372,7 +382,7 @@ def render_pending_invitations_panel():
         return 0
 
     st.markdown("### Pending Invitations")
-    st.caption("This Gmail account has invitations waiting. Join each team explicitly.")
+    st.caption("Any invitations not claimed during sign-in can still be joined here.")
 
     for invite in pending_invites:
         permission_label = {
@@ -407,7 +417,7 @@ def render_login_form():
 
     with tab1:
         st.markdown("#### Google Sign-In")
-        st.caption("Use the Gmail address that was invited to the app.")
+        st.caption("Use the invited Gmail address. Matching team invitations are applied automatically.")
         _render_google_login_button("google_login_sign_in", primary=True)
         st.markdown("")
         st.caption("Or sign in with your existing local password.")
@@ -423,14 +433,14 @@ def render_login_form():
                     st.error("Invalid credentials. Please try again.")
 
     with tab2:
-        st.caption("Invitations are accepted after you sign in with the invited Gmail account.")
+        st.caption("Invitations tied to the invited Gmail address are applied automatically after Google sign-in.")
         if _get_query_param("invite"):
             st.info(
-                "This invite token is now informational only. Sign in with the invited Gmail account and the app will list your pending invitations."
+                "This invite token is informational only. Sign in with the invited Gmail address and the app will activate the matching team."
             )
         _render_google_login_button("google_login_invites")
         st.markdown("")
-        st.caption("Existing local users can also sign in with their password and accept pending invites from the dashboard.")
+        st.caption("Existing local users can still accept any remaining invites from the dashboard.")
 
     with tab3:
         if reset_token:
