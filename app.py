@@ -2,9 +2,10 @@
 MLabs Transcription — Main Entry Point
 """
 
-import streamlit as st
-import sys
 import os
+import sys
+
+import streamlit as st
 
 # Make sure sub-packages are importable
 sys.path.insert(0, os.path.dirname(__file__))
@@ -18,14 +19,14 @@ from utils.auth_ui import (
     render_pending_invitations_panel,
     render_login_form,
 )
-from utils.components import sidebar_navigation, render_duration_badge, render_status_badge
+from utils.components import render_duration_badge, render_status_badge, sidebar_navigation
+from utils.ui import init_ui, is_mobile_view, render_page_header
 
 INVITE_ME_LINK = (
     "https://wa.me/50558601131?text=Please%20invite%20me%20to%20your%20transcription%20app,"
     "%20this%20is%20my%20email:"
 )
 
-# ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="MLabs Transcription",
     page_icon="🎙️",
@@ -33,89 +34,160 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Init DB ───────────────────────────────────────────────────────────────────
 init_db()
+init_ui()
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .main-title {
-        font-size: 2.8rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #4CAF50, #2196F3);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0;
-    }
-    .subtitle {
-        color: #888;
-        font-size: 1.1rem;
-        margin-top: 0;
-    }
-    .stat-card {
-        background: #1e1e1e;
-        border-radius: 12px;
-        padding: 20px;
-        text-align: center;
-        border: 1px solid #333;
-    }
-    .stat-number {
-        font-size: 2.4rem;
-        font-weight: 700;
-        color: #4CAF50;
-    }
-    .stat-label {
-        color: #888;
-        font-size: 0.9rem;
-    }
-    div[data-testid="stForm"] {
-        background: #1a1a1a;
-        border-radius: 12px;
-        padding: 20px;
-        border: 1px solid #333;
-    }
-</style>
-""", unsafe_allow_html=True)
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-
-# ── Main Content ──────────────────────────────────────────────────────────────
-if not is_logged_in():
+def render_logged_out_hero() -> None:
     hide_sidebar_for_logged_out()
+    mobile = is_mobile_view()
 
-    # Hero section
-    col1, col2 = st.columns([1.2, 1], gap="large")
-    with col1:
-        st.markdown('<p class="main-title">MLabs Transcription</p>', unsafe_allow_html=True)
-        st.markdown('<p class="subtitle">Transcribe any audio — any length — any format</p>', unsafe_allow_html=True)
-        st.markdown(
-            "MLabs Transcription helps teams transcribe long-form audio with shared workspaces, "
-            "permissioned access, and export-ready outputs."
-        )
-        st.caption("Made by MLabs")
-        st.markdown("")
+    render_page_header(
+        "MLabs Transcription",
+        "Transcribe any audio, collaborate with your team, and export polished outputs.",
+    )
 
-        features = [
-            ("🎙️", "Multiple AI Models", "Whisper, ElevenLabs Scribe v2, Parakeet, Real-time"),
-            ("📁", "Audio Format Support", "MP3, WAV, OPUS, M4A, FLAC, WebM, and more via FFmpeg"),
-            ("⏱️", "Long Audio Sessions", "Process 1–5 hour recordings automatically via smart chunking"),
-            ("🔑", "Your API Keys", "Bring your own keys — full control, no markups"),
-            ("📤", "Flexible Export", "TXT, DOCX, SRT, VTT, JSON, CSV, and Markdown"),
-            ("📂", "Project Management", "Organize transcriptions into projects"),
-        ]
+    features = [
+        ("🎙️", "Multiple AI Models", "Whisper, ElevenLabs Scribe v2, Parakeet, Faster-Whisper"),
+        ("📁", "Wide Audio Support", "MP3, WAV, OPUS, M4A, FLAC, WebM and more via FFmpeg"),
+        ("⏱️", "Long Audio Sessions", "Process 1–5 hour recordings with automatic chunking"),
+        ("🔑", "Flexible Keys", "Use team keys, personal keys, or one-off project keys"),
+        ("📤", "Export Ready", "TXT, Markdown and DOCX outputs for clean handoff"),
+        ("👥", "Team Workspace", "Shared projects, permissions, invitations and activity history"),
+    ]
+
+    if mobile:
+        with st.container(border=True):
+            st.markdown("### Welcome")
+            st.caption("Sign in to access your team workspace.")
+            st.link_button("Invite Me", INVITE_ME_LINK, use_container_width=True)
+            render_login_form()
+
+        st.markdown("### Why teams use it")
         for icon, title, desc in features:
-            st.markdown(f"**{icon} {title}** — {desc}")
+            with st.container(border=True):
+                st.markdown(f"**{icon} {title}**")
+                st.caption(desc)
+        return
 
+    col1, col2 = st.columns([1.3, 1], gap="large")
+    with col1:
+        st.markdown("### Why teams use it")
+        for icon, title, desc in features:
+            with st.container(border=True):
+                st.markdown(f"**{icon} {title}**")
+                st.caption(desc)
     with col2:
-        st.markdown("### Welcome")
-        st.caption("Sign in to access your team workspace.")
-        st.link_button("Invite Me", INVITE_ME_LINK, use_container_width=True)
-        render_login_form()
+        with st.container(border=True):
+            st.markdown("### Welcome")
+            st.caption("Sign in to access your team workspace.")
+            st.link_button("Invite Me", INVITE_ME_LINK, use_container_width=True)
+            render_login_form()
 
+
+def _render_stats(projects: list[dict], user_id: int) -> None:
+    total_transcriptions = 0
+    total_words = 0
+    total_duration = 0
+    completed_count = 0
+    processing_count = 0
+
+    for project in projects:
+        txs = get_project_transcriptions(project["id"], acting_user_id=user_id)
+        total_transcriptions += len(txs)
+        for tx in txs:
+            total_words += tx.get("word_count") or 0
+            total_duration += tx.get("duration_seconds") or 0
+            if tx.get("status") == "completed":
+                completed_count += 1
+            elif tx.get("status") == "processing":
+                processing_count += 1
+
+    metric_items = [
+        ("Projects", len(projects)),
+        ("Transcriptions", total_transcriptions),
+        ("Completed", completed_count),
+        ("In Progress", processing_count),
+        ("Words", f"{total_words:,}"),
+        ("Audio", render_duration_badge(total_duration) or "0s"),
+    ]
+
+    mobile = is_mobile_view()
+    if mobile:
+        for idx in range(0, len(metric_items), 2):
+            cols = st.columns(2)
+            for col, item in zip(cols, metric_items[idx: idx + 2]):
+                label, value = item
+                with col:
+                    with st.container(border=True):
+                        st.metric(label, value)
+        return
+
+    cols = st.columns(6)
+    for col, item in zip(cols, metric_items):
+        label, value = item
+        with col:
+            with st.container(border=True):
+                st.metric(label, value)
+
+
+def _render_quick_actions() -> None:
+    actions = [
+        ("🎙️ New Transcription", "pages/transcribe.py", True),
+        ("📁 Manage Projects", "pages/projects.py", False),
+        ("⚙️ Settings", "pages/settings.py", False),
+    ]
+    mobile = is_mobile_view()
+    if mobile:
+        for label, target, primary in actions:
+            if st.button(label, use_container_width=True, type="primary" if primary else "secondary"):
+                st.switch_page(target)
+        return
+
+    cols = st.columns(3)
+    for col, (label, target, primary) in zip(cols, actions):
+        with col:
+            if st.button(label, use_container_width=True, type="primary" if primary else "secondary"):
+                st.switch_page(target)
+
+
+def _render_recent_activity(projects: list[dict], user_id: int) -> None:
+    recent = []
+    for project in projects:
+        txs = get_project_transcriptions(project["id"], acting_user_id=user_id)
+        for tx in txs:
+            tx["project_name"] = project["name"]
+            recent.append(tx)
+    recent.sort(key=lambda item: item["created_at"], reverse=True)
+    recent = recent[:8]
+
+    if not recent:
+        st.info("No transcriptions yet. Start by creating a project and uploading an audio file.")
+        return
+
+    st.markdown("### Recent Activity")
+    for tx in recent:
+        with st.container(border=True):
+            st.markdown(
+                f"**{tx['original_filename']}** · {render_status_badge(tx['status'])} · "
+                f"📁 {tx['project_name']} · {render_duration_badge(tx.get('duration_seconds')) or 'Duration n/a'}"
+            )
+            meta_cols = st.columns(3)
+            with meta_cols[0]:
+                st.caption(f"Model: {tx.get('model_used', 'N/A')}")
+            with meta_cols[1]:
+                st.caption(f"Language: {tx.get('language', 'N/A')}")
+            with meta_cols[2]:
+                st.caption(f"Words: {(tx.get('word_count') or 0):,}")
+            preview = (tx.get("transcript") or "")[:360]
+            st.caption(preview + ("..." if len(tx.get("transcript") or "") > 360 else ""))
+
+
+if not is_logged_in():
+    render_logged_out_hero()
 else:
-    sidebar_navigation()
+    sidebar_navigation(current="overview")
     pending_invite_count = render_pending_invitations_panel()
-    # ── Dashboard ────────────────────────────────────────────────────────────
     user = get_current_user()
     active_team_id = get_active_team_id()
     active_team = get_user_team(user["id"], active_team_id) if active_team_id else None
@@ -127,86 +199,13 @@ else:
         st.stop()
 
     active_team_name = active_team.get("team_name") or active_team.get("name") or "Team"
-    st.markdown(f'<p class="main-title">Welcome, {user["username"]}!</p>', unsafe_allow_html=True)
-    st.markdown(f'<p class="subtitle">{active_team_name} Dashboard</p>', unsafe_allow_html=True)
-    st.markdown("")
+    render_page_header(
+        f"Welcome, {user['username']}",
+        f"{active_team_name} dashboard with responsive layouts for desktop and mobile.",
+    )
 
-    # Load user data
     projects = get_user_projects(user["id"], team_id=active_team_id)
-
-    # Aggregate stats
-    total_transcriptions = 0
-    total_words = 0
-    total_duration = 0
-    for project in projects:
-        txs = get_project_transcriptions(project["id"], acting_user_id=user["id"])
-        total_transcriptions += len(txs)
-        for tx in txs:
-            total_words += tx.get("word_count") or 0
-            total_duration += tx.get("duration_seconds") or 0
-
-    # Stats row
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(f"""<div class="stat-card">
-            <div class="stat-number">{len(projects)}</div>
-            <div class="stat-label">Projects</div></div>""", unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"""<div class="stat-card">
-            <div class="stat-number">{total_transcriptions}</div>
-            <div class="stat-label">Transcriptions</div></div>""", unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"""<div class="stat-card">
-            <div class="stat-number">{total_words:,}</div>
-            <div class="stat-label">Words Transcribed</div></div>""", unsafe_allow_html=True)
-    with c4:
-        dur_label = render_duration_badge(total_duration)
-        st.markdown(f"""<div class="stat-card">
-            <div class="stat-number" style="font-size:1.6rem;">{dur_label or "0s"}</div>
-            <div class="stat-label">Audio Processed</div></div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # Quick Actions
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        if st.button("🎙️ New Transcription", use_container_width=True, type="primary"):
-            st.switch_page("pages/transcribe.py")
-    with col_b:
-        if st.button("📁 Manage Projects", use_container_width=True):
-            st.switch_page("pages/projects.py")
-    with col_c:
-        if st.button("⚙️ API Keys & Settings", use_container_width=True):
-            st.switch_page("pages/settings.py")
-
-    st.markdown("")
-
-    # Recent transcriptions across all projects
-    if total_transcriptions > 0:
-        st.subheader("📜 Recent Activity")
-        recent = []
-        for project in projects:
-            txs = get_project_transcriptions(project["id"], acting_user_id=user["id"])
-            for tx in txs:
-                tx["project_name"] = project["name"]
-                recent.append(tx)
-        recent.sort(key=lambda x: x["created_at"], reverse=True)
-        recent = recent[:8]
-
-        for tx in recent:
-            with st.expander(
-                f"{render_status_badge(tx['status'])}  {tx['original_filename']}  —  "
-                f"📁 {tx['project_name']}  •  {render_duration_badge(tx.get('duration_seconds'))}"
-            ):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    preview = (tx.get("transcript") or "")[:400]
-                    st.text(preview + ("..." if len(tx.get("transcript") or "") > 400 else ""))
-                with col2:
-                    st.markdown(f"**Model:** {tx.get('model_used', 'N/A')}")
-                    st.markdown(f"**Language:** {tx.get('language', 'N/A')}")
-                    st.markdown(f"**Words:** {(tx.get('word_count') or 0):,}")
-    else:
-        st.info("No transcriptions yet. Start by creating a project and uploading an audio file!")
-
-
+    _render_stats(projects, user["id"])
+    st.markdown("### Quick Actions")
+    _render_quick_actions()
+    _render_recent_activity(projects, user["id"])

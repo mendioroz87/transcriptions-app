@@ -1,5 +1,5 @@
 """
-Settings page for API keys, team management, account settings, and system checks.
+Settings page for appearance, API keys, team management, account settings, and system checks.
 """
 
 import os
@@ -35,10 +35,19 @@ from transcription.engine import MODELS
 from utils.auth_ui import get_active_team_id, get_current_user, require_login, set_active_team_id
 from utils.components import sidebar_navigation
 from utils.email_sender import send_team_invitation_email
+from utils.ui import (
+    get_resolved_theme,
+    get_theme_mode,
+    init_ui,
+    is_mobile_view,
+    render_page_header,
+    set_theme_mode,
+)
 
-st.set_page_config(page_title="Settings - MLabs", page_icon="S", layout="wide")
+st.set_page_config(page_title="Settings - MLabs", page_icon="⚙️", layout="wide")
+init_ui()
 require_login()
-sidebar_navigation()
+sidebar_navigation(current="settings")
 
 user = get_current_user()
 active_team_id = get_active_team_id()
@@ -51,6 +60,7 @@ team_name = active_team.get("team_name") or active_team.get("name") or "Team"
 can_edit_personal_api_keys = bool(active_team.get("is_owner") or active_team.get("can_edit_personal_api_keys"))
 can_edit_team_api_keys = bool(active_team.get("is_owner") or active_team.get("can_edit_team_api_keys"))
 can_manage_members = bool(active_team.get("is_owner") or active_team.get("can_manage_members"))
+mobile = is_mobile_view()
 
 user_api_keys = get_user_api_keys(user["id"])
 team_api_keys = get_team_api_keys(active_team_id, acting_user_id=user["id"])
@@ -58,12 +68,13 @@ user_identities = get_user_identities(user["id"])
 google_identity = next((identity for identity in user_identities if identity.get("provider") == "google"), None)
 user_has_local_password = has_local_password(user)
 
-st.title("Settings")
-st.caption(f"Active team: {team_name}. Manage API keys, team access, and account preferences.")
-st.markdown("---")
+render_page_header(
+    "Settings",
+    f"{team_name} administration, appearance controls, and account preferences.",
+)
 
-tab_keys, tab_team, tab_account, tab_system = st.tabs(
-    ["API Keys", "Team", "Account", "System Info"]
+tab_appearance, tab_keys, tab_team, tab_account, tab_system = st.tabs(
+    ["Appearance", "API Keys", "Team", "Account", "System Info"]
 )
 
 api_providers = [
@@ -95,6 +106,37 @@ def member_role_label(member: dict) -> str:
     return permission_label(member.get("permission_level", "own_key"))
 
 
+with tab_appearance:
+    current_theme_mode = get_theme_mode()
+    current_resolved_theme = get_resolved_theme()
+    with st.form("appearance_settings_form"):
+        selected_theme_mode = st.radio(
+            "UI Theme",
+            options=["system", "light", "dark"],
+            format_func=lambda value: value.capitalize(),
+            index=["system", "light", "dark"].index(current_theme_mode),
+            horizontal=not mobile,
+            help="System follows the browser preference detected on the current device.",
+        )
+        submitted_appearance = st.form_submit_button("Save Appearance", type="primary", use_container_width=mobile)
+        if submitted_appearance:
+            set_theme_mode(selected_theme_mode)
+            st.success("Appearance updated.")
+            st.rerun()
+
+    info_cols = st.columns(2 if not mobile else 1)
+    with info_cols[0]:
+        with st.container(border=True):
+            st.markdown("**Detected Device**")
+            st.caption("Mobile" if mobile else "Desktop")
+            st.markdown("**Active Theme**")
+            st.caption(current_resolved_theme.capitalize())
+    with info_cols[1 if not mobile else 0]:
+        with st.container(border=True):
+            st.markdown("**Mode Behavior**")
+            st.caption("System mode follows the browser color scheme captured from the device.")
+            st.caption("Light and Dark override the device preference for the active session.")
+
 with tab_keys:
     st.subheader("Personal API Keys")
     if not can_edit_personal_api_keys:
@@ -102,12 +144,9 @@ with tab_keys:
 
     for provider_info in api_providers:
         with st.container(border=True):
-            col_label, col_input, col_save = st.columns([1.6, 3, 1])
-            with col_label:
+            if mobile:
                 st.markdown(f"**{provider_info['label']}**")
                 st.caption(", ".join(provider_info["models"]))
-
-            with col_input:
                 current_key = user_api_keys.get(provider_info["provider"], "")
                 new_key = st.text_input(
                     "Personal API Key",
@@ -117,8 +156,6 @@ with tab_keys:
                     key=f"personal_key_{provider_info['provider']}",
                     label_visibility="collapsed",
                 )
-
-            with col_save:
                 if st.button(
                     "Save",
                     key=f"save_personal_{provider_info['provider']}",
@@ -132,6 +169,35 @@ with tab_keys:
                         save_api_key(user["id"], provider_info["provider"], new_key.strip())
                         st.success("Saved personal key.")
                         st.rerun()
+            else:
+                col_label, col_input, col_save = st.columns([1.6, 3, 1])
+                with col_label:
+                    st.markdown(f"**{provider_info['label']}**")
+                    st.caption(", ".join(provider_info["models"]))
+                with col_input:
+                    current_key = user_api_keys.get(provider_info["provider"], "")
+                    new_key = st.text_input(
+                        "Personal API Key",
+                        value=current_key,
+                        type="password",
+                        placeholder=provider_info["placeholder"],
+                        key=f"personal_key_{provider_info['provider']}",
+                        label_visibility="collapsed",
+                    )
+                with col_save:
+                    if st.button(
+                        "Save",
+                        key=f"save_personal_{provider_info['provider']}",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=not can_edit_personal_api_keys,
+                    ):
+                        if not new_key.strip():
+                            st.error("Key cannot be empty.")
+                        else:
+                            save_api_key(user["id"], provider_info["provider"], new_key.strip())
+                            st.success("Saved personal key.")
+                            st.rerun()
 
     st.markdown("")
     st.subheader("Team API Keys")
@@ -140,12 +206,9 @@ with tab_keys:
 
     for provider_info in api_providers:
         with st.container(border=True):
-            col_label, col_input, col_save = st.columns([1.6, 3, 1])
-            with col_label:
+            if mobile:
                 st.markdown(f"**{provider_info['label']}**")
                 st.caption(f"Shared across {team_name}")
-
-            with col_input:
                 current_key = team_api_keys.get(provider_info["provider"], "")
                 new_key = st.text_input(
                     "Team API Key",
@@ -155,8 +218,6 @@ with tab_keys:
                     key=f"team_key_{provider_info['provider']}",
                     label_visibility="collapsed",
                 )
-
-            with col_save:
                 if st.button(
                     "Save",
                     key=f"save_team_{provider_info['provider']}",
@@ -178,6 +239,43 @@ with tab_keys:
                             st.rerun()
                         else:
                             st.error(msg)
+            else:
+                col_label, col_input, col_save = st.columns([1.6, 3, 1])
+                with col_label:
+                    st.markdown(f"**{provider_info['label']}**")
+                    st.caption(f"Shared across {team_name}")
+                with col_input:
+                    current_key = team_api_keys.get(provider_info["provider"], "")
+                    new_key = st.text_input(
+                        "Team API Key",
+                        value=current_key,
+                        type="password",
+                        placeholder=provider_info["placeholder"],
+                        key=f"team_key_{provider_info['provider']}",
+                        label_visibility="collapsed",
+                    )
+                with col_save:
+                    if st.button(
+                        "Save",
+                        key=f"save_team_{provider_info['provider']}",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=not can_edit_team_api_keys,
+                    ):
+                        if not new_key.strip():
+                            st.error("Key cannot be empty.")
+                        else:
+                            ok, msg = save_team_api_key(
+                                active_team_id,
+                                user["id"],
+                                provider_info["provider"],
+                                new_key.strip(),
+                            )
+                            if ok:
+                                st.success("Saved team key.")
+                                st.rerun()
+                            else:
+                                st.error(msg)
 
 with tab_team:
     st.subheader("Active Team")
@@ -207,7 +305,7 @@ with tab_team:
     else:
         for member in members:
             with st.container(border=True):
-                col_info, col_actions = st.columns([2, 3])
+                col_info, col_actions = st.columns([2, 3]) if not mobile else (st.container(), st.container())
                 with col_info:
                     st.markdown(f"**{member['username']}**")
                     st.caption(member["email"])
@@ -328,7 +426,7 @@ with tab_team:
         st.markdown("**Pending Invites**")
         for invite in pending_invites:
             with st.container(border=True):
-                c1, c2 = st.columns([4, 1])
+                c1, c2 = st.columns([4, 1]) if not mobile else (st.container(), st.container())
                 with c1:
                     st.markdown(f"**{invite['email']}**")
                     st.caption(
@@ -352,7 +450,7 @@ with tab_team:
 with tab_account:
     st.subheader("Account Information")
     with st.container(border=True):
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2) if not mobile else (st.container(), st.container())
         with col1:
             st.markdown(f"**Username:** {user['username']}")
             st.markdown(f"**Email:** {user['email']}")
@@ -384,7 +482,6 @@ with tab_account:
 
 with tab_system:
     st.subheader("System Status")
-
     ffmpeg_ok = check_ffmpeg()
     ffmpeg_status = "Installed & working" if ffmpeg_ok else "Not found"
     st.metric("FFmpeg", ffmpeg_status)
@@ -392,7 +489,7 @@ with tab_system:
     st.markdown("---")
     st.markdown("### Available Models")
     for model_key, model_info in MODELS.items():
-        col_model, col_status = st.columns([3, 1])
+        col_model, col_status = st.columns([3, 1]) if not mobile else (st.container(), st.container())
         with col_model:
             st.markdown(f"{model_info['icon']} **{model_info['label']}**")
             st.caption(model_info["description"])
@@ -423,5 +520,5 @@ with tab_system:
 
     st.markdown("---")
     st.markdown(f"**Database:** `{os.path.abspath(DB_PATH)}`")
-    st.markdown("**App Version:** 1.2.0")
+    st.markdown("**App Version:** 1.3.0")
     st.markdown("**By:** M Labs")
